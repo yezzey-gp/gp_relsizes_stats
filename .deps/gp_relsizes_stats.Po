@@ -1,0 +1,41 @@
+src/gp_relsizes_stats.o: src/gp_relsizes_stats.c \
+ /usr/local/gpdb/include/postgresql/server/postgres.h \
+ /usr/local/gpdb/include/postgresql/server/c.h \
+ /usr/local/gpdb/include/postgresql/server/postgres_ext.h \
+ /usr/local/gpdb/include/postgresql/server/pg_config_ext.h \
+ /usr/local/gpdb/include/postgresql/server/pg_config.h \
+ /usr/local/gpdb/include/postgresql/server/pg_config_manual.h \
+ /usr/local/gpdb/include/postgresql/server/pg_config_os.h \
+ /usr/local/gpdb/include/postgresql/server/port.h \
+ /usr/local/gpdb/include/postgresql/server/utils/elog.h \
+ /usr/local/gpdb/include/postgresql/server/c.h \
+ /usr/local/gpdb/include/postgresql/server/utils/errcodes.h \
+ /usr/local/gpdb/include/postgresql/server/utils/palloc.h \
+ /usr/local/gpdb/include/postgresql/server/storage/itemptr.h \
+ /usr/local/gpdb/include/postgresql/server/storage/block.h \
+ /usr/local/gpdb/include/postgresql/server/storage/off.h \
+ /usr/local/gpdb/include/postgresql/server/storage/itemid.h \
+ /usr/local/gpdb/include/postgresql/server/fmgr.h \
+ /usr/local/gpdb/include/postgresql/server/utils/builtins.h \
+ /usr/local/gpdb/include/postgresql/server/nodes/nodes.h \
+ /usr/local/gpdb/include/postgresql/server/utils/fmgrprotos.h
+/usr/local/gpdb/include/postgresql/server/postgres.h:
+/usr/local/gpdb/include/postgresql/server/c.h:
+/usr/local/gpdb/include/postgresql/server/postgres_ext.h:
+/usr/local/gpdb/include/postgresql/server/pg_config_ext.h:
+/usr/local/gpdb/include/postgresql/server/pg_config.h:
+/usr/local/gpdb/include/postgresql/server/pg_config_manual.h:
+/usr/local/gpdb/include/postgresql/server/pg_config_os.h:
+/usr/local/gpdb/include/postgresql/server/port.h:
+/usr/local/gpdb/include/postgresql/server/utils/elog.h:
+/usr/local/gpdb/include/postgresql/server/c.h:
+/usr/local/gpdb/include/postgresql/server/utils/errcodes.h:
+/usr/local/gpdb/include/postgresql/server/utils/palloc.h:
+/usr/local/gpdb/include/postgresql/server/storage/itemptr.h:
+/usr/local/gpdb/include/postgresql/server/storage/block.h:
+/usr/local/gpdb/include/postgresql/server/storage/off.h:
+/usr/local/gpdb/include/postgresql/server/storage/itemid.h:
+/usr/local/gpdb/include/postgresql/server/fmgr.h:
+/usr/local/gpdb/include/postgresql/server/utils/builtins.h:
+/usr/local/gpdb/include/postgresql/server/nodes/nodes.h:
+/usr/local/gpdb/include/postgresql/server/utils/fmgrprotos.h:
