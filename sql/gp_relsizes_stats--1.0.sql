@@ -19,3 +19,10 @@ CREATE FUNCTION always_return_square (in integer)
 RETURNS integer
 AS 'MODULE_PATHNAME', 'int_square_c_impl'
 LANGUAGE C IMMUTABLE STRICT EXECUTE ON MASTER;
+
+
+CREATE FUNCTION get_list_of_databases ()
+RETURNS TABLE (datname varchar, oid integer)
+AS 'MODULE_PATHNAME', 'get_list_of_databases'
+LANGUAGE C STRICT EXECUTE ON MASTER;
+
