@@ -19,3 +19,8 @@ CREATE FUNCTION always_return_square (in integer)
 RETURNS integer
 AS 'MODULE_PATHNAME', 'int_square_c_impl'
 LANGUAGE C IMMUTABLE STRICT EXECUTE ON MASTER;
+
+CREATE FUNCTION gp_table_sizes()
+RETURNS TABLE (datname name, oid oid)
+AS 'MODULE_PATHNAME', 'gp_table_sizes'
+LANGUAGE C STRICT EXECUTE ON MASTER;
