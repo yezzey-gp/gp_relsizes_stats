@@ -1,13 +1,1 @@
 CREATE EXTENSION gp_relsizes_stats;
-SELECT always_return_one();
- always_return_one 
--------------------
- (1)
-(1 row)
-
-SELECT always_return_square(-2);
- always_return_square 
-----------------------
-                    4
-(1 row)
-
