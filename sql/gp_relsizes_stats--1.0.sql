@@ -7,7 +7,7 @@
 
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
-CREATE FUNCTION collect_table_size(ignored_datnames varchar[])
+CREATE FUNCTION collect_table_size(ignored_datnames varchar[], base_dir varchar)
 RETURNS void
 AS 'MODULE_PATHNAME', 'collect_table_size'
 LANGUAGE C STRICT EXECUTE ON MASTER;

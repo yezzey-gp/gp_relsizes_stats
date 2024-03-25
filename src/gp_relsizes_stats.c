@@ -30,6 +30,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -42,6 +43,8 @@ PG_FUNCTION_INFO_V1(collect_table_size);
 void _PG_init(void);
 void _PG_fini(void);
 static List* get_collectable_db_ids(List *ignored_db_names);
+static int create_trunkate_table();
+static void load_all_segments_stats(char *base_dir, int dboid, TimestampTz start_time);
 Datum collect_table_size(PG_FUNCTION_ARGS);
 
 static List* get_collectable_db_ids(List *ignored_db_names) {
@@ -104,33 +107,105 @@ finish_SPI:
     return collectable_db_ids;
 }
 
+static int create_trunkate_table() {
+    int retcode = 0;
+    char *sql = "CREATE TABLE IF NOT EXISTS gp_collect_table_size(someArg varchar) DISTRIBUTED BY (someArg)"; // TODO
+
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        elog(ERROR, "create_trunkate_table: SPI_connect returned %d", retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    /* execute sql query to create table (if it not exists) */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "create_trunkate_table: SPI_execute returned %d (in create query)",
+                retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    /* set new sql query */
+    sql = "TRUNCATE TABLE gp_collect_table_size";
+
+    /* execute new sql query to trunkate table */
+    retcode = SPI_execute(sql, false, 0);
+    
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "create_trunkate_table: SPI_execute returned %d (in trunkate query)",
+                retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+finish_SPI:
+    /* finish SPI */
+    SPI_finish();
+    return retcode;
+}
+
+static void load_all_segments_stats(char *base_dir, int dboid, TimestampTz start_time) {
+    return;
+}
+
+static int write_collected_data(char *base_dir, int dboid) {
+    return 0;
+} 
+
 Datum collect_table_size(PG_FUNCTION_ARGS) {
     /* default C typed data */
     bool elem_type_by_val;
     bool *args_nulls;
     char elem_alignment_code;
+    char *base_dir;
     int16 elem_width;
-    int args_count;
+    int args_count, retcode, dboid;
 
     /* PostreSQL typed data */
-    List *ignored_db_names = NIL, *databases_ids;
     ArrayType *ignored_db_names_array;
-    Oid elem_type;
     Datum  *args_datums;
+    List *ignored_db_names = NIL, *databases_ids;
+    ListCell *current_cell;
+    Oid elem_type;
+    TimestampTz collecting_start_time;
 
+    // put all ignored_db names from fisrt array-argument
     ignored_db_names_array = PG_GETARG_ARRAYTYPE_P(0);
     elem_type = ARR_ELEMTYPE(ignored_db_names_array);
     get_typlenbyvalalign(elem_type, &elem_width, &elem_type_by_val, &elem_alignment_code);
-    deconstruct_array(ignored_db_names_array, elem_type, elem_width, 
-            elem_type_by_val, elem_alignment_code, &args_datums, &args_nulls, &args_count);
-
+    deconstruct_array(ignored_db_names_array, elem_type, elem_width, elem_type_by_val, elem_alignment_code, &args_datums, &args_nulls, &args_count);
     for (int i = 0; i < args_count; ++i) {
-        ignored_db_names = lappend(
-                ignored_db_names, 
-                (void *)DatumGetCString(DirectFunctionCall1(textout, args_datums[i]))); 
+        ignored_db_names = lappend(ignored_db_names, (void *)DatumGetCString(DirectFunctionCall1(textout, args_datums[i])));
     }
 
+    // get base_dir for csv storing
+    base_dir = DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
+
     databases_ids = get_collectable_db_ids(ignored_db_names);
+    
+    retcode = create_trunkate_table(); 
+    if (retcode < 0) {
+        elog(ERROR, "collect_table_size: create_trunkate_table: can not create or trunkate table");
+        PG_RETURN_VOID();
+    }
+    
+    foreach(current_cell, databases_ids) {
+        dboid = lfirst_int(current_cell); 
+        collecting_start_time = GetCurrentTimestamp();
+        load_all_segments_stats(base_dir, dboid, collecting_start_time);
+
+        retcode = write_collected_data(base_dir, dboid);
+        if (retcode < 0) {
+            elog(ERROR, "collect_table_size: write_collected_data: can not write data from csv to table");
+            break;
+        }
+    }
 
     PG_RETURN_VOID();
 }
