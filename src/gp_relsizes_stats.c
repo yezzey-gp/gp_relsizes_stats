@@ -34,36 +34,36 @@
 #include "utils/rel.h"
 #include "utils/timestamp.h"
 
-
 #include <limits.h> 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 
+#define MAX_QUERY_SIZE 10000 // TODO
+
 PG_MODULE_MAGIC;
 
-PG_FUNCTION_INFO_V1(int_square_c_impl);
 PG_FUNCTION_INFO_V1(collect_table_size);
-
-typedef struct segment_request_data {
-    Datum *contents;
-    Datum *hostnames;
-    Datum *ports;
-    Datum *datadirs;
-} segment_request_data_t;
+PG_FUNCTION_INFO_V1(get_file_sizes_for_database);
 
 void _PG_init(void);
 void _PG_fini(void);
-static List* get_collectable_db_ids(List *ignored_db_names);
-static int create_trunkate_table();
-static segment_request_data_t* get_segments_basedirs();
-static void load_segment_files(char *path, char* csv_path, int segment);
-static void load_all_segments_stats(char *dest_dir, int dboid);
+static List* get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context);
+static int create_truncate_fill_tables();
+static char *get_segment_data_dir(int segment_id, MemoryContext saved_context);
+static int copy_table_from_csv(char *csv_path);
+static bool is_number(char symbol);
+static void fill_relfilenode(char *dst, char *name);
+static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo);
+static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir);
 
+Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_size(PG_FUNCTION_ARGS);
 
-static List* get_collectable_db_ids(List *ignored_db_names) {
+static void print_list(List *list); // TODO delete
+
+static List* get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context) {
     /* default C typed data */
     int retcode;
     char *sql = "SELECT datname, oid \
@@ -71,7 +71,9 @@ static List* get_collectable_db_ids(List *ignored_db_names) {
                  WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon')";
 
     /* PostgreSQL typed data */
+    MemoryContext old_context = MemoryContextSwitchTo(saved_context);
     List *collectable_db_ids = NIL;
+    MemoryContextSwitchTo(old_context);
 
     /* connect to SPI */
     retcode = SPI_connect();
@@ -110,7 +112,9 @@ static List* get_collectable_db_ids(List *ignored_db_names) {
         }
 
         if (!ignored) {
-            collectable_db_ids = lappend(collectable_db_ids, (void *)tuple_values[1]);
+            MemoryContext old_context = MemoryContextSwitchTo(saved_context);
+            collectable_db_ids = lappend_int(collectable_db_ids, DatumGetInt32(tuple_values[1]));
+            MemoryContextSwitchTo(old_context);
         }
     }
 
@@ -123,14 +127,24 @@ finish_SPI:
     return collectable_db_ids;
 }
 
-static int create_trunkate_table() {
+static int create_truncate_fill_tables() {
     int retcode = 0;
-    char *sql = "CREATE TABLE IF NOT EXISTS gp_collect_table_size(someArg varchar) DISTRIBUTED BY (someArg)"; // TODO
+
+    /* CREATE, TRUNCATE AND FILL TABLE WITH MAPPINGS */
+
+    char *sql = "CREATE TABLE IF NOT EXISTS gp_toolkit.segment_file_map \
+        ( \
+           segment       int, \
+           reloid        oid, \
+           relfilenode   oid \
+        ) \
+        WITH (appendonly=true) \
+        DISTRIBUTED BY (segment)";
 
     /* connect to SPI */
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
-        elog(ERROR, "create_trunkate_table: SPI_connect returned %d", retcode);
+        elog(ERROR, "create_truncate_fill_tables: SPI_connect returned %d", retcode);
         retcode = -1;
         goto finish_SPI;
     }
@@ -140,22 +154,69 @@ static int create_trunkate_table() {
 
     /* check errors if they're occured during execution */
     if (retcode != SPI_OK_UTILITY) {
-        elog(ERROR, "create_trunkate_table: SPI_execute returned %d (in create query)",
-                retcode);
+        elog(ERROR, "create_truncate_fill_tables: SPI_execute returned %d (in create query)", retcode);
         retcode = -1;
         goto finish_SPI;
     }
 
     /* set new sql query */
-    sql = "TRUNCATE TABLE gp_collect_table_size";
+    sql = "TRUNCATE TABLE gp_toolkit.segment_file_map";
 
     /* execute new sql query to trunkate table */
     retcode = SPI_execute(sql, false, 0);
     
     /* check errors if they're occured during execution */
     if (retcode != SPI_OK_UTILITY) {
-        elog(ERROR, "create_trunkate_table: SPI_execute returned %d (in trunkate query)",
+        elog(ERROR, "create_truncate_fill_tables: SPI_execute returned %d (in truncate query)",
                 retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    sql = "INSERT INTO gp_toolkit.segment_file_map \
+        SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random('pg_class')";
+
+    /* execute sql query to insert values into new table */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_INSERT) {
+        elog(ERROR, "create_truncate_fill_tables: SPI_execute returned %d (in insert query)", retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    /* CREATE AND TRUNCATE TABLE WITH FILE SIZES */
+
+    sql = "CREATE TABLE IF NOT EXISTS gp_toolkit.segment_file_sizes \
+        ( \
+           segment       int, \
+           relfilenode   oid, \
+           filepath      varchar(128), \
+           size          bigint, \
+           mtime         bigint \
+        ) \
+        WITH (appendonly=true, OIDS=FALSE) \
+        DISTRIBUTED RANDOMLY";
+
+    /* execute sql query to create table */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "create_truncate_fill_tables: SPI_execute returned %d (in create query)", retcode);
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    sql = "TRUNCATE TABLE gp_toolkit.segment_file_sizes";
+
+    /* execute sql query to create table */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "create_truncate_fill_tables: SPI_execute returned %d (in truncate query)", retcode);
         retcode = -1;
         goto finish_SPI;
     }
@@ -166,106 +227,157 @@ finish_SPI:
     return retcode;
 }
 
-static segment_request_data_t* get_segments_basedirs() {
-    int retcode = 0;
-    segment_request_data_t *packed_data = NULL;
+static char *get_segment_data_dir(int segment_id, MemoryContext saved_context) {
+    int retcode;
+    
+    MemoryContext old_context = MemoryContextSwitchTo(saved_context);
+    char *data_dir = NULL;
+    MemoryContextSwitchTo(old_context);
+    
     char *sql = "SELECT content, hostname, port, datadir \
-                FROM gp_segment_configuration \
-                WHERE role = 'p' \
-                ORDER BY port"; 
-    /* connect to SPI */
+                 FROM gp_segment_configuration \
+                 WHERE role = 'p' \
+                 ORDER BY port";
+
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
         elog(ERROR, "get_segments_basedirs: SPI_connect returned %d", retcode);
         goto finish_SPI;
-    } 
+    }
 
     /* execute sql query to get table */
     retcode = SPI_execute(sql, true, 0);
-
-    /* check errors if they're occured during execution */
     if (retcode != SPI_OK_SELECT || SPI_processed < 0) {
         elog(ERROR, "get_segments_basedirs: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
         goto finish_SPI;
     }
-    
-    packed_data = palloc0(sizeof(*packed_data));
-    packed_data->contents = palloc0(SPI_processed * sizeof(*packed_data->contents));
-    packed_data->hostnames = palloc0(SPI_processed * sizeof(*packed_data->hostnames));
-    packed_data->ports = palloc0(SPI_processed * sizeof(*packed_data->ports));
-    packed_data->datadirs = palloc0(SPI_processed * sizeof(*packed_data->datadirs));
 
     Datum *tuple_values = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_values));
     bool *tuple_nullable = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_nullable));
-    
+
     for (int i = 0; i < SPI_processed; ++i) {
         HeapTuple current_tuple = SPI_tuptable->vals[i];
         heap_deform_tuple(current_tuple, SPI_tuptable->tupdesc, tuple_values, tuple_nullable);
 
-        packed_data->contents[i] = tuple_values[0];
-        packed_data->hostnames[i] = tuple_values[1];
-        packed_data->ports[i] = tuple_values[2];
-        packed_data->datadirs[i] = tuple_values[3];
+        if (DatumGetInt32(tuple_values[0]) == segment_id) {
+            MemoryContext old_context = MemoryContextSwitchTo(saved_context);
+            int path_length = strlen(DatumGetCString(DirectFunctionCall1(textout, tuple_values[1])));
+            data_dir = palloc0((path_length + 1) * sizeof(*data_dir));
+            memcpy(data_dir, DatumGetCString(DirectFunctionCall1(textout, tuple_values[1])), path_length);
+            MemoryContextSwitchTo(old_context);
+            break;
+        }
     }
 
     pfree(tuple_values);
     pfree(tuple_nullable);
 
 finish_SPI:
-    /* finish SPI */
     SPI_finish();
-    return packed_data;
+    return data_dir;
 }
 
-static void clear_dest_dir(char *dest_path) {
-    struct stat stb;
-    struct dirent *file;
-    char new_path[PATH_MAX];
-    DIR *csv_dir = AllocateDir(dest_path);
-    if (!csv_dir) {
-        return;
+static int copy_table_from_csv(char *csv_path) {
+    int retcode;
+    char save_query[MAX_QUERY_SIZE];
+    sprintf(save_query, "COPY gp_toolkit.segment_file_sizes FROM '%s' WITH (FORMAT csv)", csv_path);
+    
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        elog(ERROR, "copy_table_from_csv: SPI_connect returned %d", retcode);
+        retcode = -1;
+        goto finish_SPI;
     }
-    while ((file = ReadDir(csv_dir, dest_path)) != NULL) {
-        char *filename = file->d_name; 
-        /* if limit of PATH_MAX reached skip file */
-        if (sprintf(new_path, "%s/%s", dest_path, filename) >= sizeof(new_path)) {
-            continue;
-        }
 
-        /* do lstat if returned error => continue */
-        if (lstat(new_path, &stb) < 0 && S_ISREG(stb.st_mode) && 
-                (strncmp(filename, "files_", 6) == 0 || strncmp(filename, "map_", 4) == 0)) { // TODO more clear way to check prefix?
-            /* remove file with old csv data */
-            remove(new_path);
-        }
+    /* execute sql query to get table */
+    retcode = SPI_execute(save_query, false, 0);
+    if (retcode != SPI_OK_UTILITY) { 
+        elog(ERROR, "copy_table_from_csv: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
+        retcode = -1;
+        goto finish_SPI;
     }
-    FreeDir(csv_dir);
+
+finish_SPI:
+    SPI_finish();
+    return retcode;
 }
 
-static void load_segment_files(char *path, char* csv_path) {
+static bool is_number(char symbol) {
+    return '0' <= symbol && symbol <= '9';
+}
+
+static void fill_relfilenode(char *dst, char *name) {
+    memset(dst, 0, PATH_MAX);
+    int start_pos = 0, pos = 0;
+    while (start_pos < strlen(name) && !is_number(name[start_pos])) {
+        ++start_pos;
+    }
+    while (start_pos < strlen(name) && is_number(name[start_pos])) {
+        dst[pos++] = name[start_pos++];
+    }
+}
+
+static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo) {
+    /* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
+    MemoryContext oldcontext = MemoryContextSwitchTo(saved_context);
+
+    /* Makes the output TupleDesc */
+    TupleDesc tupdesc = CreateTemplateTupleDesc(5, false);
+    TupleDescInitEntry(tupdesc, (AttrNumber)1, "segment", INT4OID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber)2, "relfilenode", OIDOID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber)3, "filepath", TEXTOID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber)4, "size", INT8OID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber)5, "mtime", INT8OID, -1, 0);
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    /* Checks if random access is allowed */
+    bool randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+    /* Starts the tuplestore */
+    Tuplestorestate* tupstore = tuplestore_begin_heap(randomAccess, false, work_mem);
+
+    /* Set the output */
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult = tupstore;
+    rsinfo->setDesc = tupdesc;
+
+    Datum *outputValues = palloc0(5 * sizeof(*outputValues)); 
+    bool* outputNulls = palloc0(5 * sizeof(*outputNulls));
+
+    /* Returns to the old context */
+    MemoryContextSwitchTo(oldcontext);
+
+
     /* if {path} is NULL => return */
-    if (!path) {
+    if (!data_dir) {
+        pfree(outputValues);
+        pfree(outputNulls);
         return;
     }
 
     char new_path[PATH_MAX];
-    DIR *current_dir = AllocateDir(path);
+    char relfilenode[PATH_MAX];
+    memset(relfilenode, 0, PATH_MAX);
+
+    DIR *current_dir = AllocateDir(data_dir);
     /* if {current_dir} did not opened => return */
     if (!current_dir) {
+        pfree(outputValues);
+        pfree(outputNulls);
         return;
     }
 
     struct dirent *file;
     /* start itterating in {current_dir} */
-    while ((file = ReadDir(current_dir, path)) != NULL) {
+    while ((file = ReadDir(current_dir, data_dir)) != NULL) {
         char *filename = file->d_name;
+
         /* if filename is special as "." or ".." => continue */
         if (strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) {
             continue;
         }
 
         /* if limit of PATH_MAX reached skip file */
-        if (sprintf(new_path, "%s/%s", path, filename) >= sizeof(new_path)) {
+        if (sprintf(new_path, "%s/%s", data_dir, filename) >= sizeof(new_path)) {
             continue;
         }
 
@@ -275,89 +387,247 @@ static void load_segment_files(char *path, char* csv_path) {
             continue;
         }
 
-        if (S_ISREG(stb.st_mode)) {
+        if (S_ISREG(stb.st_mode)) {      
             // here write to csv data about file
             // need to write ({start_time}, {segment}, {filename_numbers}, {filename}, {stb.st_size}, {stb.st_mtimespec})
             // can store a lot of different stats here (lstat sys call is MVP)
-            FILE *csv_ptr = AllocateFile(csv_path, "a");
-            fprintf(csv_ptr, "%d,%s,%ld,%ld\n", GpIdentity.segindex, filename,
-                    stb.st_size, stb.st_mtime);
-            FreeFile(csv_ptr);
+
+            fill_relfilenode(relfilenode, filename);
+            /*
+             * FILE *csv_ptr = AllocateFile(csv_path, "a");
+             * fprintf(csv_ptr, "%d,%s,%s,%ld,%ld\n", segment_id, relfilenode, filename,
+             *       stb.st_size, stb.st_mtime);
+             * FreeFile(csv_ptr);
+             */
+            outputValues[0] = Int32GetDatum(segment_id);
+            outputValues[1] = ObjectIdGetDatum(strtoul(relfilenode, NULL, 10));
+            outputValues[2] = CStringGetDatum(filename);
+            outputValues[3] = Int64GetDatum(stb.st_size);
+            outputValues[4] = Int64GetDatum(stb.st_mtime);
+            
+            /* Builds the output tuple (row) */
+            HeapTuple outputTuple = heap_form_tuple(tupdesc, outputValues, outputNulls);
+            /* Puts in the output tuplestore */
+            tuplestore_puttuple(tupstore, outputTuple);
+
         } else if (S_ISDIR(stb.st_mode)) {
-            load_segment_files(new_path, csv_path, segment);
+            fill_csv(segment_id, new_path, csv_path, saved_context, rsinfo);
         }
     }
     FreeDir(current_dir);
+
+    pfree(outputValues);
+    pfree(outputNulls);
 }
 
-static void load_segment_map(Datum host, Datum port) {
-    return;
-}
+Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
+    ReturnSetInfo* rsinfo = (ReturnSetInfo*)fcinfo->resultinfo;
+    /* check to see if caller supports us returning a tuplestore */
+    if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("set-valued function called in context that cannot accept a set")));
+    if (!(rsinfo->allowedModes & SFRM_Materialize))
+        ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR), errmsg("materialize mode required, but it is not allowed in this context")));
 
-static void load_segment_stats(int dboid, Datum segment, Datum host, Datum port, Datum base_dir, char *dest_dir) {
-    char filepath_files[1000]; // TODO put 1000 in constant
-    char filepath_map[1000]; // TODO put 1000 in constant
-    char final_base_dir[1000]; // TODO put correct value in constant and change 1000 to it
+
+    int segment_id = GpIdentity.segindex;
+    int dboid = PG_GETARG_INT32(0);
+    char *dest_dir = DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
+
+    /* {dest_dir}/{dboid}/files_gpseg{segment_id}.csv - in Ditriy's code, 
+     * but we store that csv on segment => we can use that way
+     * {dest_dir}/files_gp{dboid}.csv => no need to create directory for each db
+     */
     
-    /* create csv files and put headers in them */
-    sprintf(filepath_files, "%s/files_gpseg%d.csv", dest_dir, DatumGetInt32(segment));
-    FILE *csv_ptr = AllocateFile(filepath_files, "w");
-    fprintf(csv_ptr, "startTime, segment, filename, size, lastModified\n");
-    FreeFile(csv_ptr);
+    char cwd[PATH_MAX];
+    char csv_path[PATH_MAX];
+    char data_dir[PATH_MAX];
+    getcwd(cwd, sizeof(cwd));
 
-    sprintf(filepath_map, "%s/map_gpseg%d.csv", dest_dir, DatumGetInt32(segment));
-    csv_ptr = AllocateFile(filepath_map, "w");
-    fprintf(csv_ptr, "\n"); // TODO
-    FreeFile(csv_ptr);
-
-    // TODO prepare correct base dir "{base_dir}/base/{dboid}"
-    sprintf(final_base_dir, "%s/base/%d", DatumGetCString(base_dir), dboid);
+    char dest_dir_true[PATH_MAX];
+    memset(dest_dir_true, 0, PATH_MAX);
+    sprintf(dest_dir_true, "%s/dir", cwd);
+    struct stat st = {0};
+    if (stat(dest_dir_true, &st) == -1) {
+        mkdir(dest_dir_true, 0770);
+    }
     
-    TimestampTz start_time = GetCurrentTimestamp();
-    load_segment_files(final_base_dir, filepath_files, DatumGetInt32(segment));
-    load_segment_map(segment, host, port);
-    TimestampTz finish_time = GetCurrentTimestamp();
+    sprintf(csv_path, "%s/files_gp%d_%d.csv", dest_dir_true, segment_id, dboid);
+    sprintf(data_dir, "%s/base/%d", cwd, dboid);
+
+    /* clear file (maybe use unlink here)*/
+    truncate(csv_path, 0);
+
+    
+    // i need segment_id, dboid, base_dir (where files placed), csv_path
+    fill_csv(segment_id, data_dir, csv_path, CurrentMemoryContext, rsinfo);
+
+       // TODO create query on master by C-function using
+    // write csv into table
+    /*
+    if (copy_table_from_csv(csv_path) < 0) {
+        PG_RETURN_VOID();
+    }
+    */
+
+    //PG_RETURN_VOID();
+    return (Datum) 0;
 }
 
+static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir) {
+    /* default C typed data */
+    int retcode = 0;
+    char query[MAX_QUERY_SIZE];
+    
+    /* PostreSQL typed data */
+    ListCell *current_cell;
 
-static void load_all_segments_stats(char *dest_dir, int dboid) {
-    // get segment basedirs
-    segment_request_data_t *segment_data = get_segments_basedirs();
+    foreach(current_cell, databases_ids) {
+        int dbid = lfirst_int(current_cell); 
+        sprintf(query, "SELECT get_file_sizes_for_database(%d, '%s'::varchar)", dbid, dest_dir);
 
-    // clear segment base dir from old csv
-    clear_dest_dir(dest_dir);
+        /* connect to SPI */
+        retcode = SPI_connect();
+        if (retcode < 0) { /* error */
+            elog(ERROR, "get_file_sizes_for_databases: SPI_connect returned %d", retcode);
+            retcode = -1;
+            goto finish_SPI;
+        }
 
-    int segments_cnt = sizeof(segment_data->contents);
-    // itterate in segment base_dirs + segment names
-    for (int i = 0; i < segments_cnt; ++i) {
-        // starts load_segment_stats(_ssh??) function
-        load_segment_stats(dboid, segment_data->contents[i], segment_data->hostnames[i], segment_data->ports[i],
-                segment_data->datadirs[i], dest_dir);
+        /* execute sql query to create table (if it not exists) */
+        retcode = SPI_execute(query, false, 0);
+
+        /* check errors if they're occured during execution */
+        if (retcode != SPI_OK_SELECT) {
+            elog(ERROR, "get_file_sizes_for_databases: SPI_execute returned %d", retcode);
+            retcode = -1;
+            goto finish_SPI;
+        }
+
+finish_SPI:
+        SPI_finish();
+        if (retcode < 0) {
+            break;
+        }
     }
+
+    return retcode;
 }
 
-static int write_collected_data(char *path, int dboid) {
-    if (!path) {
-        return 0;
+static int write_final_result() {
+    int retcode = 0;
+    char *sql = "CREATE OR REPLACE VIEW gp_toolkit.table_files AS \
+        WITH part_oids AS ( \
+            SELECT n.nspname, c1.relname, c1.oid \
+            FROM pg_class c1 \
+            JOIN pg_namespace n ON c1.relnamespace = n.oid \
+            WHERE c1.reltablespace != (SELECT oid FROM pg_tablespace WHERE spcname = 'pg_global') \
+            UNION \
+            SELECT n.nspname, c1.relname, c2.oid \
+            FROM pg_class c1 \
+            JOIN pg_namespace n ON c1.relnamespace = n.oid \
+            JOIN pg_partition pp ON c1.oid = pp.parrelid \
+            JOIN pg_partition_rule pr ON pp.oid = pr.paroid \
+            JOIN pg_class c2 ON pr.parchildrelid = c2.oid \
+            WHERE c1.reltablespace != (SELECT oid FROM pg_tablespace WHERE spcname = 'pg_global') \
+        ), \
+        table_oids AS ( \
+            SELECT po.nspname, po.relname, po.oid, 'main' AS kind \
+                FROM part_oids po \
+            UNION \
+            SELECT po.nspname, po.relname, t.reltoastrelid, 'toast' AS kind \
+                FROM part_oids po \
+                JOIN pg_class t ON po.oid = t.oid \
+                WHERE t.reltoastrelid > 0 \
+            UNION \
+            SELECT po.nspname, po.relname, ti.indexrelid, 'toast_idx' AS kind \
+                FROM part_oids po \
+                JOIN pg_class t ON po.oid = t.oid \
+                JOIN pg_index ti ON t.reltoastrelid = ti.indrelid \
+                WHERE t.reltoastrelid > 0 \
+            UNION \
+            SELECT po.nspname, po.relname, ao.segrelid, 'ao' AS kind \
+                FROM part_oids po \
+                JOIN pg_appendonly ao ON po.oid = ao.relid \
+            UNION \
+            SELECT po.nspname, po.relname, ao.visimaprelid, 'ao_vm' AS kind \
+                FROM part_oids po \
+                JOIN pg_appendonly ao ON po.oid = ao.relid \
+            UNION \
+            SELECT po.nspname, po.relname, ao.visimapidxid, 'ao_vm_idx' AS kind \
+                FROM part_oids po \
+                JOIN pg_appendonly ao ON po.oid = ao.relid \
+        ) \
+        SELECT table_oids.nspname, table_oids.relname, m.segment, m.relfilenode, fs.filepath, kind, size, mtime \
+        FROM table_oids \
+        JOIN gp_toolkit.segment_file_map m ON table_oids.oid = m.reloid \
+        JOIN gp_toolkit.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode";
+
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        elog(ERROR, "TODO: SPI_connect returned %d", retcode); // TODO
+        retcode = -1;
+        goto finish_SPI;
     }
-    return 0;
-} 
+
+    /* execute sql query to create view (if it not exists) */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "TODO: SPI_execute returned %d (in create query)", retcode); //TODO
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    sql = "CREATE OR REPLACE VIEW gp_toolkit.table_sizes AS \
+        SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM gp_toolkit.table_files \
+        GROUP BY nspname, relname";
+
+    /* execute sql query to create view (if it not exists) */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "TODO: SPI_execute returned %d (in create query)", retcode); //TODO
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+    sql = "CREATE OR REPLACE VIEW gp_toolkit.namespace_sizes AS \
+        SELECT nspname, sum(size) AS size FROM gp_toolkit.table_files \
+        GROUP BY nspname";
+
+    /* execute sql query to create view (if it not exists) */
+    retcode = SPI_execute(sql, false, 0);
+
+    /* check errors if they're occured during execution */
+    if (retcode != SPI_OK_UTILITY) {
+        elog(ERROR, "TODO: SPI_execute returned %d (in create query)", retcode); //TODO
+        retcode = -1;
+        goto finish_SPI;
+    }
+
+finish_SPI:
+    SPI_finish();
+    return retcode; 
+}
 
 Datum collect_table_size(PG_FUNCTION_ARGS) {
     /* default C typed data */
     bool elem_type_by_val;
     bool *args_nulls;
     char elem_alignment_code;
-    char *base_dir;
+    char *dest_dir;
     int16 elem_width;
-    int args_count, retcode, dboid;
+    int args_count;
 
     /* PostreSQL typed data */
     ArrayType *ignored_db_names_array;
     Datum  *args_datums;
     List *ignored_db_names = NIL, *databases_ids;
-    ListCell *current_cell;
     Oid elem_type;
+    MemoryContext saved_context = CurrentMemoryContext;
 
     // put all ignored_db names from fisrt array-argument
     ignored_db_names_array = PG_GETARG_ARRAYTYPE_P(0);
@@ -369,26 +639,21 @@ Datum collect_table_size(PG_FUNCTION_ARGS) {
     }
 
     // get base_dir for csv storing
-    base_dir = DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
+    dest_dir = DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
 
-    databases_ids = get_collectable_db_ids(ignored_db_names);
+    databases_ids = get_collectable_db_ids(ignored_db_names, saved_context);
     
-    retcode = create_trunkate_table(); 
-    if (retcode < 0) {
-        elog(ERROR, "collect_table_size: create_trunkate_table: can not create or trunkate table");
+    if (create_truncate_fill_tables() < 0) {
         PG_RETURN_VOID();
     }
-    
-    foreach(current_cell, databases_ids) {
-        dboid = lfirst_int(current_cell); 
-        // prepare csv
-        load_all_segments_stats(base_dir, dboid);
 
-        retcode = write_collected_data(base_dir, dboid);
-        if (retcode < 0) {
-            elog(ERROR, "collect_table_size: write_collected_data: can not write data from csv to table");
-            break;
-        }
+    if (get_file_sizes_for_databases(databases_ids, dest_dir) < 0) {
+        PG_RETURN_VOID();
+    }
+
+    // join tables and insert into final
+    if (write_final_result() < 0) {
+        PG_RETURN_VOID();
     }
 
     PG_RETURN_VOID();
@@ -401,4 +666,14 @@ void _PG_init(void) {
 
 void _PG_fini(void) {
   // nothing to do here for this template
+}
+
+static void print_list(List *list) { // TODO delete
+    ListCell *cell;
+    FILE *fptr = fopen("/tmp/shit", "a");
+    foreach(cell, list) {
+        fprintf(fptr, "data: %d\n", lfirst_int(cell));
+    }
+    fprintf(fptr, "----------\n");
+    fclose(fptr);
 }
