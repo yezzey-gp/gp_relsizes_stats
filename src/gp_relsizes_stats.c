@@ -188,7 +188,7 @@ static int create_truncate_fill_tables() {
         ( \
            segment       int, \
            relfilenode   oid, \
-           filepath      varchar(128), \
+           filepath      text, \
            size          bigint, \
            mtime         bigint \
         ) \
@@ -253,6 +253,8 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
     TupleDescInitEntry(tupdesc, (AttrNumber)5, "mtime", INT8OID, -1, 0);
     tupdesc = BlessTupleDesc(tupdesc);
 
+    AttInMetadata *attinmeta = TupleDescGetAttInMetadata(tupdesc);
+
     /* Checks if random access is allowed */
     bool randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
     /* Starts the tuplestore */
@@ -263,17 +265,16 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
     rsinfo->setResult = tupstore;
     rsinfo->setDesc = tupdesc;
 
-    Datum *outputValues = palloc0(5 * sizeof(*outputValues)); 
-    bool* outputNulls = palloc0(5 * sizeof(*outputNulls));
-
+    char **values = palloc(5 * sizeof(char *)); // TODO remove const from code
+    for (int i = 0; i < 5; ++i) {
+        values[i] = palloc0(PATH_MAX * sizeof(char));
+    }
     /* Returns to the old context */
     MemoryContextSwitchTo(oldcontext);
 
 
     /* if {path} is NULL => return */
     if (!data_dir) {
-        pfree(outputValues);
-        pfree(outputNulls);
         return;
     }
 
@@ -284,8 +285,6 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
     DIR *current_dir = AllocateDir(data_dir);
     /* if {current_dir} did not opened => return */
     if (!current_dir) {
-        pfree(outputValues);
-        pfree(outputNulls);
         return;
     }
 
@@ -321,16 +320,26 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
              *       stb.st_size, stb.st_mtime);
              * FreeFile(csv_ptr);
              */
-            outputValues[0] = Int32GetDatum(segment_id);
-            outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
-            outputValues[2] = CStringGetDatum(filename);
-            outputValues[3] = Int64GetDatum(stb.st_size);
-            outputValues[4] = Int64GetDatum(stb.st_mtime);
-            
+
+            sprintf(values[0], "%d", segment_id);
+            sprintf(values[1], "%d", fill_relfilenode(filename));
+            sprintf(values[2], "%s", new_path);
+            sprintf(values[3], "%ld", stb.st_size);
+            sprintf(values[4], "%ld", stb.st_mtime);
+
             /* Builds the output tuple (row) */
-            HeapTuple outputTuple = heap_form_tuple(tupdesc, outputValues, outputNulls);
+            //HeapTuple outputTuple = heap_form_tuple(tupdesc, outputValues, outputNulls);
+            HeapTuple outputTuple = BuildTupleFromCStrings(attinmeta, values);
+
             /* Puts in the output tuplestore */
             tuplestore_puttuple(tupstore, outputTuple);
+
+            /*
+            FILE *fptr = fopen("/tmp/shit", "a");
+            fprintf(fptr, "data-> segment_id:%d, relfilename:%d, fileapth:%s, size:%ld, mtime:%ld\n", 
+                    segment_id, fill_relfilenode(filename), new_path, stb.st_size, stb.st_mtime);
+            fclose(fptr);
+            */
 
         } else if (S_ISDIR(stb.st_mode)) {
             fill_file_sizes(segment_id, new_path, csv_path, saved_context, rsinfo);
@@ -338,8 +347,9 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
     }
     FreeDir(current_dir);
 
-    pfree(outputValues);
-    pfree(outputNulls);
+    FILE *fptr = fopen("/tmp/shit", "a");
+    fprintf(fptr, "at the end %d", segment_id);
+    fclose(fptr);
 }
 
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
@@ -353,7 +363,6 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
 
     int segment_id = GpIdentity.segindex;
     int dboid = PG_GETARG_INT32(0);
-    char *dest_dir = DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
 
     /* {dest_dir}/{dboid}/files_gpseg{segment_id}.csv - in Ditriy's code, 
      * but we store that csv on segment => we can use that way
@@ -365,15 +374,15 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     char data_dir[PATH_MAX];
     getcwd(cwd, sizeof(cwd));
 
-    char dest_dir_true[PATH_MAX];
-    memset(dest_dir_true, 0, PATH_MAX);
-    sprintf(dest_dir_true, "%s/dir", cwd);
+    char dest_dir[PATH_MAX];
+    memset(dest_dir, 0, PATH_MAX);
+    sprintf(dest_dir, "%s/dir", cwd);
     struct stat st = {0};
-    if (stat(dest_dir_true, &st) == -1) {
-        mkdir(dest_dir_true, 0770);
+    if (stat(dest_dir, &st) == -1) {
+        mkdir(dest_dir, 0770);
     }
     
-    sprintf(csv_path, "%s/files_gp%d_%d.csv", dest_dir_true, segment_id, dboid);
+    sprintf(csv_path, "%s/files_gp%d_%d.csv", dest_dir, segment_id, dboid);
     sprintf(data_dir, "%s/base/%d", cwd, dboid);
 
     /* clear file (maybe use unlink here)*/
@@ -396,7 +405,12 @@ static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir) {
 
     foreach(current_cell, databases_ids) {
         int dbid = lfirst_int(current_cell); 
-        sprintf(query, "SELECT get_file_sizes_for_database(%d, '%s'::varchar)", dbid, dest_dir);
+        sprintf(query, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \ 
+                SELECT get_file_sizes_for_database(%d)", dbid);
+
+        FILE *fptr = fopen("/tmp/shit", "a");
+        fprintf(fptr, "%s\n", query);
+        fclose(fptr);
 
         /* connect to SPI */
         retcode = SPI_connect();
@@ -410,7 +424,7 @@ static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir) {
         retcode = SPI_execute(query, false, 0);
 
         /* check errors if they're occured during execution */
-        if (retcode != SPI_OK_SELECT) {
+        if (retcode != SPI_OK_INSERT) {
             elog(ERROR, "get_file_sizes_for_databases: SPI_execute returned %d", retcode);
             retcode = -1;
             goto finish_SPI;

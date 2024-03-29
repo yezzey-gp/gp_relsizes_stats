@@ -7,8 +7,8 @@
 
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
-CREATE FUNCTION get_file_sizes_for_database(dboid integer, dest_dir varchar)
-RETURNS TABLE (segment int, relfilenode oid, filepath varchar(128), size bigint, mtime bigint)
+CREATE FUNCTION get_file_sizes_for_database(dboid integer)
+RETURNS TABLE (segment int, relfilenode oid, filepath text, size bigint, mtime bigint)
 AS 'MODULE_PATHNAME', 'get_file_sizes_for_database'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
