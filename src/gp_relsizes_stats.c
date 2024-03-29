@@ -51,17 +51,13 @@ void _PG_init(void);
 void _PG_fini(void);
 static List* get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context);
 static int create_truncate_fill_tables();
-static char *get_segment_data_dir(int segment_id, MemoryContext saved_context);
-static int copy_table_from_csv(char *csv_path);
 static bool is_number(char symbol);
-static void fill_relfilenode(char *dst, char *name);
-static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo);
+static unsigned int fill_relfilenode(char *name);
+static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo);
 static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir);
 
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_size(PG_FUNCTION_ARGS);
-
-static void print_list(List *list); // TODO delete
 
 static List* get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context) {
     /* default C typed data */
@@ -227,86 +223,12 @@ finish_SPI:
     return retcode;
 }
 
-static char *get_segment_data_dir(int segment_id, MemoryContext saved_context) {
-    int retcode;
-    
-    MemoryContext old_context = MemoryContextSwitchTo(saved_context);
-    char *data_dir = NULL;
-    MemoryContextSwitchTo(old_context);
-    
-    char *sql = "SELECT content, hostname, port, datadir \
-                 FROM gp_segment_configuration \
-                 WHERE role = 'p' \
-                 ORDER BY port";
-
-    retcode = SPI_connect();
-    if (retcode < 0) { /* error */
-        elog(ERROR, "get_segments_basedirs: SPI_connect returned %d", retcode);
-        goto finish_SPI;
-    }
-
-    /* execute sql query to get table */
-    retcode = SPI_execute(sql, true, 0);
-    if (retcode != SPI_OK_SELECT || SPI_processed < 0) {
-        elog(ERROR, "get_segments_basedirs: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
-        goto finish_SPI;
-    }
-
-    Datum *tuple_values = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_values));
-    bool *tuple_nullable = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_nullable));
-
-    for (int i = 0; i < SPI_processed; ++i) {
-        HeapTuple current_tuple = SPI_tuptable->vals[i];
-        heap_deform_tuple(current_tuple, SPI_tuptable->tupdesc, tuple_values, tuple_nullable);
-
-        if (DatumGetInt32(tuple_values[0]) == segment_id) {
-            MemoryContext old_context = MemoryContextSwitchTo(saved_context);
-            int path_length = strlen(DatumGetCString(DirectFunctionCall1(textout, tuple_values[1])));
-            data_dir = palloc0((path_length + 1) * sizeof(*data_dir));
-            memcpy(data_dir, DatumGetCString(DirectFunctionCall1(textout, tuple_values[1])), path_length);
-            MemoryContextSwitchTo(old_context);
-            break;
-        }
-    }
-
-    pfree(tuple_values);
-    pfree(tuple_nullable);
-
-finish_SPI:
-    SPI_finish();
-    return data_dir;
-}
-
-static int copy_table_from_csv(char *csv_path) {
-    int retcode;
-    char save_query[MAX_QUERY_SIZE];
-    sprintf(save_query, "COPY gp_toolkit.segment_file_sizes FROM '%s' WITH (FORMAT csv)", csv_path);
-    
-    retcode = SPI_connect();
-    if (retcode < 0) { /* error */
-        elog(ERROR, "copy_table_from_csv: SPI_connect returned %d", retcode);
-        retcode = -1;
-        goto finish_SPI;
-    }
-
-    /* execute sql query to get table */
-    retcode = SPI_execute(save_query, false, 0);
-    if (retcode != SPI_OK_UTILITY) { 
-        elog(ERROR, "copy_table_from_csv: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
-        retcode = -1;
-        goto finish_SPI;
-    }
-
-finish_SPI:
-    SPI_finish();
-    return retcode;
-}
-
 static bool is_number(char symbol) {
     return '0' <= symbol && symbol <= '9';
 }
 
-static void fill_relfilenode(char *dst, char *name) {
+static unsigned int fill_relfilenode(char *name) {
+    char dst[PATH_MAX];
     memset(dst, 0, PATH_MAX);
     int start_pos = 0, pos = 0;
     while (start_pos < strlen(name) && !is_number(name[start_pos])) {
@@ -315,9 +237,10 @@ static void fill_relfilenode(char *dst, char *name) {
     while (start_pos < strlen(name) && is_number(name[start_pos])) {
         dst[pos++] = name[start_pos++];
     }
+    return strtoul(dst, NULL, 10);
 }
 
-static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo) {
+static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo) {
     /* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
     MemoryContext oldcontext = MemoryContextSwitchTo(saved_context);
 
@@ -390,9 +313,8 @@ static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryConte
         if (S_ISREG(stb.st_mode)) {      
             // here write to csv data about file
             // need to write ({start_time}, {segment}, {filename_numbers}, {filename}, {stb.st_size}, {stb.st_mtimespec})
-            // can store a lot of different stats here (lstat sys call is MVP)
-
-            fill_relfilenode(relfilenode, filename);
+            // can store a lot of different stats here (lstat sys call is MVP (P = player))
+            //
             /*
              * FILE *csv_ptr = AllocateFile(csv_path, "a");
              * fprintf(csv_ptr, "%d,%s,%s,%ld,%ld\n", segment_id, relfilenode, filename,
@@ -400,7 +322,7 @@ static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryConte
              * FreeFile(csv_ptr);
              */
             outputValues[0] = Int32GetDatum(segment_id);
-            outputValues[1] = ObjectIdGetDatum(strtoul(relfilenode, NULL, 10));
+            outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
             outputValues[2] = CStringGetDatum(filename);
             outputValues[3] = Int64GetDatum(stb.st_size);
             outputValues[4] = Int64GetDatum(stb.st_mtime);
@@ -411,7 +333,7 @@ static void fill_csv(int segment_id, char *data_dir, char *csv_path, MemoryConte
             tuplestore_puttuple(tupstore, outputTuple);
 
         } else if (S_ISDIR(stb.st_mode)) {
-            fill_csv(segment_id, new_path, csv_path, saved_context, rsinfo);
+            fill_file_sizes(segment_id, new_path, csv_path, saved_context, rsinfo);
         }
     }
     FreeDir(current_dir);
@@ -459,17 +381,8 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
 
     
     // i need segment_id, dboid, base_dir (where files placed), csv_path
-    fill_csv(segment_id, data_dir, csv_path, CurrentMemoryContext, rsinfo);
+    fill_file_sizes(segment_id, data_dir, csv_path, CurrentMemoryContext, rsinfo);
 
-       // TODO create query on master by C-function using
-    // write csv into table
-    /*
-    if (copy_table_from_csv(csv_path) < 0) {
-        PG_RETURN_VOID();
-    }
-    */
-
-    //PG_RETURN_VOID();
     return (Datum) 0;
 }
 
@@ -666,14 +579,4 @@ void _PG_init(void) {
 
 void _PG_fini(void) {
   // nothing to do here for this template
-}
-
-static void print_list(List *list) { // TODO delete
-    ListCell *cell;
-    FILE *fptr = fopen("/tmp/shit", "a");
-    foreach(cell, list) {
-        fprintf(fptr, "data: %d\n", lfirst_int(cell));
-    }
-    fprintf(fptr, "----------\n");
-    fclose(fptr);
 }
