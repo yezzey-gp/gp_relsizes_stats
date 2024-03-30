@@ -53,7 +53,7 @@ static List* get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_
 static int create_truncate_fill_tables();
 static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
-static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo);
+static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo, FunctionCallInfo fcinfo);
 static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir);
 
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
@@ -240,20 +240,19 @@ static unsigned int fill_relfilenode(char *name) {
     return strtoul(dst, NULL, 10);
 }
 
-static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo) {
+static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, MemoryContext saved_context, ReturnSetInfo* rsinfo, FunctionCallInfo fcinfo) {
+    FILE *fptr = fopen("/tmp/shit", "a");
+    fprintf(fptr, "at the begin %d with data_dir %s\n", segment_id, data_dir);
+    fclose(fptr);
     /* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
     MemoryContext oldcontext = MemoryContextSwitchTo(saved_context);
 
     /* Makes the output TupleDesc */
-    TupleDesc tupdesc = CreateTemplateTupleDesc(5, false);
-    TupleDescInitEntry(tupdesc, (AttrNumber)1, "segment", INT4OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber)2, "relfilenode", OIDOID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber)3, "filepath", TEXTOID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber)4, "size", INT8OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber)5, "mtime", INT8OID, -1, 0);
-    tupdesc = BlessTupleDesc(tupdesc);
+    TupleDesc tupdesc;
 
-    AttInMetadata *attinmeta = TupleDescGetAttInMetadata(tupdesc);
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        elog(ERROR, "return type must be a row type");
+    tupdesc = BlessTupleDesc(tupdesc);
 
     /* Checks if random access is allowed */
     bool randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
@@ -265,10 +264,10 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
     rsinfo->setResult = tupstore;
     rsinfo->setDesc = tupdesc;
 
-    char **values = palloc(5 * sizeof(char *)); // TODO remove const from code
-    for (int i = 0; i < 5; ++i) {
-        values[i] = palloc0(PATH_MAX * sizeof(char));
-    }
+    Datum outputValues[5];
+    bool outputNulls[5];
+    MemSet(outputNulls, 0, sizeof(outputNulls));
+
     /* Returns to the old context */
     MemoryContextSwitchTo(oldcontext);
 
@@ -313,42 +312,23 @@ static void fill_file_sizes(int segment_id, char *data_dir, char *csv_path, Memo
             // here write to csv data about file
             // need to write ({start_time}, {segment}, {filename_numbers}, {filename}, {stb.st_size}, {stb.st_mtimespec})
             // can store a lot of different stats here (lstat sys call is MVP (P = player))
-            //
-            /*
-             * FILE *csv_ptr = AllocateFile(csv_path, "a");
-             * fprintf(csv_ptr, "%d,%s,%s,%ld,%ld\n", segment_id, relfilenode, filename,
-             *       stb.st_size, stb.st_mtime);
-             * FreeFile(csv_ptr);
-             */
-
-            sprintf(values[0], "%d", segment_id);
-            sprintf(values[1], "%d", fill_relfilenode(filename));
-            sprintf(values[2], "%s", new_path);
-            sprintf(values[3], "%ld", stb.st_size);
-            sprintf(values[4], "%ld", stb.st_mtime);
-
+            outputValues[0] = Int32GetDatum(segment_id);
+            outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
+            outputValues[2] = CStringGetTextDatum(filename);
+            outputValues[3] = Int64GetDatum(stb.st_size);
+            outputValues[4] = Int64GetDatum(stb.st_mtime);
+            
             /* Builds the output tuple (row) */
-            //HeapTuple outputTuple = heap_form_tuple(tupdesc, outputValues, outputNulls);
-            HeapTuple outputTuple = BuildTupleFromCStrings(attinmeta, values);
-
             /* Puts in the output tuplestore */
-            tuplestore_puttuple(tupstore, outputTuple);
-
-            /*
-            FILE *fptr = fopen("/tmp/shit", "a");
-            fprintf(fptr, "data-> segment_id:%d, relfilename:%d, fileapth:%s, size:%ld, mtime:%ld\n", 
-                    segment_id, fill_relfilenode(filename), new_path, stb.st_size, stb.st_mtime);
-            fclose(fptr);
-            */
-
+            tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
         } else if (S_ISDIR(stb.st_mode)) {
-            fill_file_sizes(segment_id, new_path, csv_path, saved_context, rsinfo);
+            fill_file_sizes(segment_id, new_path, csv_path, saved_context, rsinfo, fcinfo);
         }
     }
     FreeDir(current_dir);
 
-    FILE *fptr = fopen("/tmp/shit", "a");
-    fprintf(fptr, "at the end %d", segment_id);
+    fptr = fopen("/tmp/shit", "a");
+    fprintf(fptr, "at the end %d with data_dir %s\n", segment_id, data_dir);
     fclose(fptr);
 }
 
@@ -390,7 +370,11 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
 
     
     // i need segment_id, dboid, base_dir (where files placed), csv_path
-    fill_file_sizes(segment_id, data_dir, csv_path, CurrentMemoryContext, rsinfo);
+    fill_file_sizes(segment_id, data_dir, csv_path, CurrentMemoryContext, rsinfo, fcinfo);
+
+    FILE *fptr = fopen("/tmp/shit", "a");
+    fprintf(fptr, "at the final end %d\n", segment_id);
+    fclose(fptr);
 
     return (Datum) 0;
 }

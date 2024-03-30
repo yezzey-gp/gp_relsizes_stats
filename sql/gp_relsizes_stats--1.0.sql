@@ -8,7 +8,8 @@
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
 CREATE FUNCTION get_file_sizes_for_database(dboid integer)
-RETURNS TABLE (segment int, relfilenode oid, filepath text, size bigint, mtime bigint)
+RETURNS TABLE (segmentf int, relfilenode oid, filepath text, size bigint, mtime bigint)
+--RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'get_file_sizes_for_database'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
