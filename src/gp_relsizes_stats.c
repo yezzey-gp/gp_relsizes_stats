@@ -1,43 +1,12 @@
 #include "postgres.h"
 
-#include "access/htup_details.h"
-#include "access/reloptions.h"
-#include "access/sysattr.h"
-#include "access/xact.h"
-#include "catalog/pg_foreign_table.h"
-#include "catalog/pg_type.h"
 #include "cdb/cdbvars.h"
-#include "commands/copy.h"
 #include "commands/defrem.h"
-#include "commands/explain.h"
-#include "commands/trigger.h"
-#include "commands/vacuum.h"
 #include "executor/spi.h"
-#include "fmgr.h"
-#include "foreign/fdwapi.h"
-#include "foreign/foreign.h"
 #include "funcapi.h"
-#include "lib/stringinfo.h"
-#include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "nodes/pg_list.h"
-#include "optimizer/cost.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/planmain.h"
-#include "optimizer/restrictinfo.h"
-#include "optimizer/var.h"
-#include "pgstat.h"
 #include "utils/builtins.h"
-#include "utils/elog.h"
 #include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/timestamp.h"
 
-#include <limits.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 #include <sys/stat.h>
 
 #define MAX_QUERY_SIZE PATH_MAX // obviously 150 is enough (150 > 135 + 10)
@@ -56,7 +25,7 @@ static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
 static void fill_file_sizes(int segment_id, char *data_dir,
                             FunctionCallInfo fcinfo);
-static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir);
+static int get_file_sizes_for_databases(List *databases_ids);
 
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_size(PG_FUNCTION_ARGS);
@@ -380,7 +349,7 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
   return (Datum)0;
 }
 
-static int get_file_sizes_for_databases(List *databases_ids, char *dest_dir) {
+static int get_file_sizes_for_databases(List *databases_ids) {
   /* default C typed data */
   int retcode = 0;
   char query[MAX_QUERY_SIZE];
@@ -534,7 +503,6 @@ Datum collect_table_size(PG_FUNCTION_ARGS) {
   bool elem_type_by_val;
   bool *args_nulls;
   char elem_alignment_code;
-  char *dest_dir;
   int16 elem_width;
   int args_count;
 
@@ -559,17 +527,13 @@ Datum collect_table_size(PG_FUNCTION_ARGS) {
         (void *)DatumGetCString(DirectFunctionCall1(textout, args_datums[i])));
   }
 
-  // get base_dir for csv storing
-  dest_dir =
-      DatumGetCString(DirectFunctionCall1(textout, (Datum)PG_GETARG_TEXT_P(1)));
-
   databases_ids = get_collectable_db_ids(ignored_db_names, saved_context);
 
   if (create_truncate_fill_tables() < 0) {
     PG_RETURN_VOID();
   }
 
-  if (get_file_sizes_for_databases(databases_ids, dest_dir) < 0) {
+  if (get_file_sizes_for_databases(databases_ids) < 0) {
     PG_RETURN_VOID();
   }
 
