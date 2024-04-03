@@ -12,7 +12,7 @@ RETURNS TABLE (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mti
 AS 'MODULE_PATHNAME', 'get_file_sizes_for_database'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
-CREATE FUNCTION collect_table_size(ignored_datnames VARCHAR[])
+CREATE FUNCTION collect_table_sizes(ignored_dbnames VARCHAR[])
 RETURNS void
-AS 'MODULE_PATHNAME', 'collect_table_size'
+AS 'MODULE_PATHNAME', 'collect_table_sizes'
 LANGUAGE C STRICT EXECUTE ON MASTER;

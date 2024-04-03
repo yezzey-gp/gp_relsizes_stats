@@ -498,7 +498,7 @@ finish_SPI:
   return retcode;
 }
 
-Datum collect_table_sizes(PG_FUNCTION_ARGS) {
+Datum collect_table_size(PG_FUNCTION_ARGS) {
   /* default C typed data */
   bool elem_type_by_val;
   bool *args_nulls;
