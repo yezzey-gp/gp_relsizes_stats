@@ -84,8 +84,6 @@ static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fci
     pfree(tuple_values);
     pfree(tuple_nullable);
 
-finish_SPI:
-    /* finish SPI */
     SPI_finish();
     return collectable_db_ids;
 }
@@ -214,20 +212,18 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     int dboid = PG_GETARG_INT32(0);
 
     getcwd(cwd, sizeof(cwd));
-    sprintf(data_dir, "%s/base/%d", cwd, dboid);
+    if (sprintf(data_dir, "%s/base/%d", cwd, dboid) >= sizeof(data_dir)) {
+        ereport(ERROR, (errmsg("get_file_sizes_for_database: failed to write path to data_dir (path too long)")));
+    }
 
-    // i need segment_id, dboid, base_dir (where files placed)
     fill_file_sizes(segment_id, data_dir, fcinfo);
 
-    return (Datum)0;
+    return (Datum) 0;
 }
 
 static int get_file_sizes_for_databases(List *databases_ids) {
-    /* default C typed data */
     int retcode = 0;
     char query[MAX_QUERY_SIZE];
-
-    /* PostreSQL typed data */
     ListCell *current_cell;
 
     /* connect to SPI */
@@ -246,7 +242,7 @@ static int get_file_sizes_for_databases(List *databases_ids) {
         retcode = SPI_execute(query, false, 0);
 
         /* check errors if they're occured during execution */
-        if (retcode != SPI_OK_INSERT) {
+        if (retcode != SPI_OK_INSERT) { /* error */
             elog(ERROR, "get_file_sizes_for_databases: SPI_execute returned %d", retcode);
         }
     }
@@ -256,14 +252,11 @@ static int get_file_sizes_for_databases(List *databases_ids) {
 }
 
 Datum collect_table_sizes(PG_FUNCTION_ARGS) {
-    /* default C typed data */
     bool elem_type_by_val;
     bool *args_nulls;
     char elem_alignment_code;
     int16 elem_width;
     int args_count;
-
-    /* PostreSQL typed data */
     ArrayType *ignored_db_names_array;
     Datum *args_datums;
     List *ignored_db_names = NIL, *databases_ids;
