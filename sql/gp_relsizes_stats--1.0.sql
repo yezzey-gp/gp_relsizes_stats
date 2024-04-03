@@ -7,6 +7,7 @@
 
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
+
 CREATE FUNCTION prepare_info_tables() RETURNS VOID
 LANGUAGE plpgsql VOLATILE EXECUTE ON MASTER AS
 $func$
@@ -18,7 +19,6 @@ BEGIN
     EXECUTE 'TRUNCATE TABLE gp_toolkit.segment_file_map';
     EXECUTE 'INSERT INTO gp_toolkit.segment_file_map 
         SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random(''pg_class'')';
-
     -- create table and clear if it's exists 
     EXECUTE 'CREATE TABLE IF NOT EXISTS gp_toolkit.segment_file_sizes
         (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
@@ -27,6 +27,64 @@ BEGIN
 END
 $func$;
 
+CREATE FUNCTION prepare_info_views() RETURNS VOID
+LANGUAGE plpgsql VOLATILE EXECUTE ON MASTER AS
+$func$
+BEGIN
+    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.table_files AS
+        WITH part_oids AS (
+            SELECT n.nspname, c1.relname, c1.oid
+            FROM pg_class c1
+            JOIN pg_namespace n ON c1.relnamespace = n.oid
+            WHERE c1.reltablespace != (SELECT oid FROM pg_tablespace WHERE spcname = ''pg_global'')
+            UNION
+            SELECT n.nspname, c1.relname, c2.oid
+            FROM pg_class c1
+            JOIN pg_namespace n ON c1.relnamespace = n.oid
+            JOIN pg_partition pp ON c1.oid = pp.parrelid
+            JOIN pg_partition_rule pr ON pp.oid = pr.paroid
+            JOIN pg_class c2 ON pr.parchildrelid = c2.oid
+            WHERE c1.reltablespace != (SELECT oid FROM pg_tablespace WHERE spcname = ''pg_global'')
+        ),
+        table_oids AS (
+            SELECT po.nspname, po.relname, po.oid, ''main'' AS kind
+                FROM part_oids po
+            UNION
+            SELECT po.nspname, po.relname, t.reltoastrelid, ''toast'' AS kind
+                FROM part_oids po
+                JOIN pg_class t ON po.oid = t.oid
+                WHERE t.reltoastrelid > 0
+            UNION
+            SELECT po.nspname, po.relname, ti.indexrelid, ''toast_idx'' AS kind
+                FROM part_oids po
+                JOIN pg_class t ON po.oid = t.oid
+                JOIN pg_index ti ON t.reltoastrelid = ti.indrelid
+                WHERE t.reltoastrelid > 0
+            UNION
+            SELECT po.nspname, po.relname, ao.segrelid, ''ao'' AS kind
+                FROM part_oids po
+                JOIN pg_appendonly ao ON po.oid = ao.relid
+            UNION
+            SELECT po.nspname, po.relname, ao.visimaprelid, ''ao_vm'' AS kind
+                FROM part_oids po
+                JOIN pg_appendonly ao ON po.oid = ao.relid
+            UNION
+            SELECT po.nspname, po.relname, ao.visimapidxid, ''ao_vm_idx'' AS kind
+                FROM part_oids po
+                JOIN pg_appendonly ao ON po.oid = ao.relid
+        )
+        SELECT table_oids.nspname, table_oids.relname, m.segment, m.relfilenode, fs.filepath, kind, size, mtime
+        FROM table_oids
+        JOIN gp_toolkit.segment_file_map m ON table_oids.oid = m.reloid
+        JOIN gp_toolkit.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode';
+    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.table_sizes AS
+        SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM gp_toolkit.table_files
+        GROUP BY nspname, relname';
+    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.namespace_sizes AS
+        SELECT nspname, sum(size) AS size FROM gp_toolkit.table_files
+        GROUP BY nspname';
+END
+$func$;
 
 CREATE FUNCTION get_file_sizes_for_database(dboid INTEGER)
 RETURNS TABLE (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
@@ -38,3 +96,16 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'collect_table_sizes'
 LANGUAGE C STRICT EXECUTE ON MASTER;
 
+CREATE FUNCTION get_relsizes_stats(ignored_dbnames VARCHAR[]) RETURNS VOID
+LANGUAGE plpgsql VOLATILE EXECUTE ON MASTER AS
+$func$
+BEGIN
+    -- create info tables
+    EXECUTE 'SELECT prepare_info_tables()';
+    -- create info views
+    EXECUTE 'SELECT prepare_info_views()';
+    -- collect data about tables
+    EXECUTE format('SELECT * FROM collect_table_sizes(
+    (SELECT array_agg(value)::varchar[] FROM unnest(''%s''::text[]) AS value))', $1);
+END
+$func$;
