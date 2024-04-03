@@ -18,7 +18,7 @@ PG_FUNCTION_INFO_V1(get_file_sizes_for_database);
 
 void _PG_init(void);
 void _PG_fini(void);
-static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context);
+static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fcinfo);
 static int create_truncate_fill_tables();
 static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
@@ -28,7 +28,7 @@ static int get_file_sizes_for_databases(List *databases_ids);
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
 
-static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_context) {
+static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fcinfo) {
     /* default C typed data */
     int retcode;
     char *sql = "SELECT datname, oid \
@@ -36,7 +36,8 @@ static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_
                  WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon')";
 
     /* PostgreSQL typed data */
-    MemoryContext old_context = MemoryContextSwitchTo(saved_context);
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+    MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
     List *collectable_db_ids = NIL;
     MemoryContextSwitchTo(old_context);
 
@@ -44,7 +45,6 @@ static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
         elog(ERROR, "gp_table_sizes: SPI_connect returned %d", retcode);
-        goto finish_SPI;
     }
 
     /* execute sql query to get table */
@@ -53,7 +53,6 @@ static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_
     /* check errors if they're occured during execution */
     if (retcode != SPI_OK_SELECT || SPI_processed < 0) {
         elog(ERROR, "get_collectable_db_ids: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
-        goto finish_SPI;
     }
 
     Datum *tuple_values = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_values));
@@ -76,7 +75,7 @@ static List *get_collectable_db_ids(List *ignored_db_names, MemoryContext saved_
         }
 
         if (!ignored) {
-            MemoryContext old_context = MemoryContextSwitchTo(saved_context);
+            MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
             collectable_db_ids = lappend_int(collectable_db_ids, DatumGetInt32(tuple_values[1]));
             MemoryContextSwitchTo(old_context);
         }
@@ -184,18 +183,21 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
         }
 
         if (S_ISREG(stb.st_mode)) {
-            // here write to csv data about file
-            // need to write ({start_time}, {segment}, {filename_numbers}, {filename},
-            // {stb.st_size}, {stb.st_mtimespec}) can store a lot of different stats
-            // here (lstat sys call is MVP (P = player))
+            /* If file is regular we should count 
+             * its size and put values into tupstore
+             *
+             * insert tuple:
+             * (segment_is, relfilenode, new_path, stb.st_size, stb.st_mtime)
+             */
             outputValues[0] = Int32GetDatum(segment_id);
             outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
             outputValues[2] = CStringGetTextDatum(new_path);
             outputValues[3] = Int64GetDatum(stb.st_size);
             outputValues[4] = Int64GetDatum(stb.st_mtime);
 
-            /* Builds the output tuple (row) */
-            /* Puts in the output tuplestore */
+            /* Builds the output tuple (row)
+             * and put it in the tuplestore 
+             */
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
         } else if (S_ISDIR(stb.st_mode)) {
             fill_file_sizes(segment_id, new_path, fcinfo);
@@ -228,19 +230,17 @@ static int get_file_sizes_for_databases(List *databases_ids) {
     /* PostreSQL typed data */
     ListCell *current_cell;
 
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        elog(ERROR, "get_file_sizes_for_databases: SPI_connect returned %d", retcode);
+    }
+
     foreach (current_cell, databases_ids) {
         int dbid = lfirst_int(current_cell);
         sprintf(query, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
                 SELECT * from get_file_sizes_for_database(%d)",
                 dbid);
-
-        /* connect to SPI */
-        retcode = SPI_connect();
-        if (retcode < 0) { /* error */
-            elog(ERROR, "get_file_sizes_for_databases: SPI_connect returned %d", retcode);
-            retcode = -1;
-            goto finish_SPI;
-        }
 
         /* execute sql query to create table (if it not exists) */
         retcode = SPI_execute(query, false, 0);
@@ -248,17 +248,10 @@ static int get_file_sizes_for_databases(List *databases_ids) {
         /* check errors if they're occured during execution */
         if (retcode != SPI_OK_INSERT) {
             elog(ERROR, "get_file_sizes_for_databases: SPI_execute returned %d", retcode);
-            retcode = -1;
-            goto finish_SPI;
-        }
-
-    finish_SPI:
-        SPI_finish();
-        if (retcode < 0) {
-            break;
         }
     }
 
+    SPI_finish();
     return retcode;
 }
 
@@ -275,7 +268,6 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
     Datum *args_datums;
     List *ignored_db_names = NIL, *databases_ids;
     Oid elem_type;
-    MemoryContext saved_context = CurrentMemoryContext;
 
     // put all ignored_db names from fisrt array-argument
     ignored_db_names_array = PG_GETARG_ARRAYTYPE_P(0);
@@ -288,7 +280,7 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
             lappend(ignored_db_names, (void *)DatumGetCString(DirectFunctionCall1(textout, args_datums[i])));
     }
 
-    databases_ids = get_collectable_db_ids(ignored_db_names, saved_context);
+    databases_ids = get_collectable_db_ids(ignored_db_names, fcinfo);
 
     if (get_file_sizes_for_databases(databases_ids) < 0) {
         PG_RETURN_VOID();
