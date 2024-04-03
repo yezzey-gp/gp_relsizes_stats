@@ -29,31 +29,31 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
 
 static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fcinfo) {
-    /* default C typed data */
     int retcode;
     char *sql = "SELECT datname, oid \
                  FROM pg_database \
                  WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon')";
-
-    /* PostgreSQL typed data */
     ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
-    MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
-    List *collectable_db_ids = NIL;
-    MemoryContextSwitchTo(old_context);
 
     /* connect to SPI */
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
-        elog(ERROR, "gp_table_sizes: SPI_connect returned %d", retcode);
+        ereport(ERROR, (errmsg("gp_table_sizes: SPI_connect failed")));
     }
 
     /* execute sql query to get table */
     retcode = SPI_execute(sql, true, 0);
 
     /* check errors if they're occured during execution */
-    if (retcode != SPI_OK_SELECT || SPI_processed < 0) {
-        elog(ERROR, "get_collectable_db_ids: SPI_execute returned %d, processed %lu rows", retcode, SPI_processed);
+    if (retcode != SPI_OK_SELECT || SPI_processed < 0) { /* error */
+        SPI_finish();
+        ereport(ERROR, (errmsg("get_collectable_db_ids: SPI_execute failed (select datname, oid)")));
     }
+
+    /* result store arrays */
+    MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+    List *collectable_db_ids = NIL;
+    MemoryContextSwitchTo(old_context);
 
     Datum *tuple_values = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_values));
     bool *tuple_nullable = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_nullable));
@@ -104,9 +104,13 @@ static unsigned int fill_relfilenode(char *name) {
 }
 
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo) {
-    ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+    /* if {path} is NULL => return */
+    if (!data_dir) {
+        return;
+    }
 
-    /* check to see if caller supports us returning a tuplestore */
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+    /* Check to see if caller supports us returning a tuplestore */
     if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo)) {
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("set-valued function called in context that cannot "
@@ -117,14 +121,13 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
                                                               "in this context")));
     }
 
-    /* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
+    /* Switch to query context */
     MemoryContext oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
-
-    /* Makes the output TupleDesc */
+    /* Make the output TupleDesc */
     TupleDesc tupdesc;
-
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-        elog(ERROR, "return type must be a row type");
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR, (errmsg("fill_file_sizes: incorrect return type in fcinfo (must be a row type)")));
+    }
     tupdesc = BlessTupleDesc(tupdesc);
 
     /* Checks if random access is allowed */
@@ -144,11 +147,6 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     /* Returns to the old context */
     MemoryContextSwitchTo(oldcontext);
 
-    /* if {path} is NULL => return */
-    if (!data_dir) {
-        return;
-    }
-
     char new_path[PATH_MAX];
     char relfilenode[PATH_MAX];
     memset(relfilenode, 0, PATH_MAX);
@@ -156,7 +154,7 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     DIR *current_dir = AllocateDir(data_dir);
     /* if {current_dir} did not opened => return */
     if (!current_dir) {
-        return;
+        ereport(ERROR, (errmsg("fill_file_sizes: failed to allocate current directory")));
     }
 
     struct dirent *file;
@@ -229,7 +227,7 @@ static int get_file_sizes_for_databases(List *databases_ids) {
     /* connect to SPI */
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
-        elog(ERROR, "get_file_sizes_for_databases: SPI_connect returned %d", retcode);
+        ereport(ERROR, (errmsg("get_file_sizes_for_databases: SPI_connect failed")));
     }
 
     foreach (current_cell, databases_ids) {
@@ -243,7 +241,8 @@ static int get_file_sizes_for_databases(List *databases_ids) {
 
         /* check errors if they're occured during execution */
         if (retcode != SPI_OK_INSERT) { /* error */
-            elog(ERROR, "get_file_sizes_for_databases: SPI_execute returned %d", retcode);
+            SPI_finish();
+            ereport(ERROR, (errmsg("get_file_sizes_for_databases: SPI_execute failed (insert into segment_file_sizes)")));
         }
     }
 
@@ -275,9 +274,7 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
 
     databases_ids = get_collectable_db_ids(ignored_db_names, fcinfo);
 
-    if (get_file_sizes_for_databases(databases_ids) < 0) {
-        PG_RETURN_VOID();
-    }
+    get_file_sizes_for_databases(databases_ids);
 
     PG_RETURN_VOID();
 }
