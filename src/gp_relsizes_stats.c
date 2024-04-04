@@ -146,13 +146,13 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     rsinfo->setDesc = tupdesc;
 
     Datum outputValues[FILEINFO_ARGS_CNT];
-    bool outputNulls[eILEINFO_ARGS_CNT];
+    bool outputNulls[FILEINFO_ARGS_CNT];
     MemSet(outputNulls, 0, sizeof(outputNulls));
 
     /* Returns to the old context */
     MemoryContextSwitchTo(oldcontext);
 
-    char new_path[PATH_MAX];
+    char file_path[PATH_MAX];
     char relfilenode[PATH_MAX];
     memset(relfilenode, 0, PATH_MAX);
 
@@ -173,14 +173,14 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
         }
 
         /* if limit of PATH_MAX reached skip file */
-        if (sprintf(new_path, "%s/%s", data_dir, filename) >= sizeof(new_path)) {
+        if (sprintf(file_path, "%s/%s", data_dir, filename) >= sizeof(file_path)) {
             ereport(WARNING, (errmsg("fill_file_sizes: path to file is too long (unexpected behavior)")));
             continue;
         }
 
         struct stat stb;
         /* do lstat if returned error => continue */
-        if (lstat(new_path, &stb) < 0) {
+        if (lstat(file_path, &stb) < 0) {
             ereport(WARNING, (errmsg("fill_file_sizes: lstat failed (unexpected behavior)")));
             continue;
         }
@@ -190,11 +190,11 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
              * its size and put values into tupstore
              *
              * insert tuple:
-             * (segment_is, relfilenode, new_path, stb.st_size, stb.st_mtime)
+             * (segment_is, relfilenode, file_path, stb.st_size, stb.st_mtime)
              */
             outputValues[0] = Int32GetDatum(segment_id);
             outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
-            outputValues[2] = CStringGetTextDatum(new_path);
+            outputValues[2] = CStringGetTextDatum(file_path);
             outputValues[3] = Int64GetDatum(stb.st_size);
             outputValues[4] = Int64GetDatum(stb.st_mtime);
 
@@ -202,8 +202,6 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
              * and put it in the tuplestore 
              */
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
-        } else if (S_ISDIR(stb.st_mode)) {
-            fill_file_sizes(segment_id, new_path, fcinfo);
         }
     }
     FreeDir(current_dir);
