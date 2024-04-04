@@ -18,7 +18,7 @@ PG_FUNCTION_INFO_V1(get_file_sizes_for_database);
 
 void _PG_init(void);
 void _PG_fini(void);
-static List *get_collectable_db_ids(Datum *ignored_db_names, int ignored_db_names_count, MemoryContext main_ctx);
+static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx);
 static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo);
@@ -27,7 +27,7 @@ static int get_file_sizes_for_databases(List *databases_ids);
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
 
-static List *get_collectable_db_ids(Datum *ignored_db_names, int ignored_db_names_count, MemoryContext main_ctx) {
+static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx) {
     int retcode;
     char sql[MAX_QUERY_SIZE];
 
@@ -35,8 +35,8 @@ static List *get_collectable_db_ids(Datum *ignored_db_names, int ignored_db_name
     sprintf(sql, "SELECT datname, oid \
                  FROM pg_database \
                  WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon'");
-    for (int i = 0; i < ignored_db_names_count; ++i) {
-        sprintf(sql, "%s, '%s'", sql, DatumGetCString(DirectFunctionCall1(textout, ignored_db_names[i])));
+    for (int i = 0; i < ignored_dbnames_count; ++i) {
+        sprintf(sql, "%s, '%s'", sql, DatumGetCString(DirectFunctionCall1(textout, ignored_dbnames[i])));
     }
     sprintf(sql, "%s)", sql);
 
@@ -247,21 +247,21 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
     bool *args_nulls;
     char elem_alignment_code;
     int16 elem_width;
-    int args_count;
-    ArrayType *ignored_db_names_array;
-    Datum *args_datums;
-    List *ignored_db_names = NIL, *databases_ids;
+    int ignored_dbnames_count;
+    ArrayType *ignored_dbnames_array;
+    Datum *ignored_dbnames;
+    List *databases_ids;
     Oid elem_type;
 
     // put all ignored_db names from fisrt array-argument
-    ignored_db_names_array = PG_GETARG_ARRAYTYPE_P(0);
-    elem_type = ARR_ELEMTYPE(ignored_db_names_array);
+    ignored_dbnames_array = PG_GETARG_ARRAYTYPE_P(0);
+    elem_type = ARR_ELEMTYPE(ignored_dbnames_array);
     get_typlenbyvalalign(elem_type, &elem_width, &elem_type_by_val, &elem_alignment_code);
-    deconstruct_array(ignored_db_names_array, elem_type, elem_width, elem_type_by_val, elem_alignment_code,
-                      &args_datums, &args_nulls, &args_count);
+    deconstruct_array(ignored_dbnames_array, elem_type, elem_width, elem_type_by_val, elem_alignment_code,
+                      &ignored_dbnames, &args_nulls, &ignored_dbnames_count);
 
 
-    databases_ids = get_collectable_db_ids(args_datums, args_count, CurrentMemoryContext);
+    databases_ids = get_collectable_db_ids(ignored_dbnames, ignored_dbnames_count, CurrentMemoryContext);
 
     get_file_sizes_for_databases(databases_ids);
 
