@@ -33,25 +33,56 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS);
  */
 static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx) {
     int retcode;
-    char sql[MAX_QUERY_SIZE];
+    //char sql[MAX_QUERY_SIZE], buffer[MAX_QUERY_SIZE];
+    char *sql = NULL, *buffer = NULL;
 
     /* fill sql query with ignored dbnames */
-    sprintf(sql, "SELECT datname, oid \
+    retcode = asprintf(&sql, "SELECT datname, oid \
                  FROM pg_database \
                  WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon'");
-    for (int i = 0; i < ignored_dbnames_count; ++i) {
-        sprintf(sql, "%s, '%s'", sql, DatumGetCString(DirectFunctionCall1(textout, ignored_dbnames[i])));
+    if (retcode < 0) {
+        ereport(ERROR, (errmsg("get_collectable_db_ids: failed to write sql query (select datname, oid)")));
     }
-    sprintf(sql, "%s)", sql);
+
+    retcode = asprintf(&buffer, "%s", sql);
+    free(sql);
+    if (retcode < 0) {
+        ereport(ERROR, (errmsg("get_collectable_db_ids: failed to write sql query (select datname, oid)")));
+    }
+
+    for (int i = 0; i < ignored_dbnames_count; ++i) {
+        retcode = asprintf(&sql, "%s, '%s'", buffer, DatumGetCString(DirectFunctionCall1(textout, ignored_dbnames[i])));
+        free(buffer);
+        if (retcode < 0) {
+            ereport(ERROR, (errmsg("get_collectable_db_ids: failed to write sql query (select datname, oid)")));
+        }
+
+        retcode = asprintf(&buffer, "%s", sql);
+        free(sql);
+        if (retcode < 0) {
+            ereport(ERROR, (errmsg("get_collectable_db_ids: failed to write sql query (select datname, oid)")));
+        }
+    }
+
+    retcode = asprintf(&sql, "%s)", buffer);
+    free(buffer);
+    if (retcode < 0) {
+        ereport(ERROR, (errmsg("get_collectable_db_ids: failed to write sql query (select datname, oid)")));
+    }
 
     /* connect to SPI */
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
+        free(sql);
         ereport(ERROR, (errmsg("gp_table_sizes: SPI_connect failed")));
     }
 
     /* execute sql query to get table */
     retcode = SPI_execute(sql, true, 0);
+
+    if (sql != NULL) {
+        free(sql);
+    }
 
     /* check errors if they're occured during execution */
     if (retcode != SPI_OK_SELECT || SPI_processed < 0) { /* error */
@@ -110,8 +141,7 @@ static unsigned int fill_relfilenode(char *name) {
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo) {
     /* if {path} is NULL => return */
     if (!data_dir) {
-        ereport(WARNING, (errmsg("fill_file_sizes: path to datadir is NULL (unexpected behavior)")));
-        return;
+        ereport(ERROR, (errmsg("fill_file_sizes: path to datadir is NULL (unexpected behavior)")));
     }
 
     ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
