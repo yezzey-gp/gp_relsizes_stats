@@ -18,8 +18,7 @@ PG_FUNCTION_INFO_V1(get_file_sizes_for_database);
 
 void _PG_init(void);
 void _PG_fini(void);
-static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fcinfo);
-static int create_truncate_fill_tables();
+static List *get_collectable_db_ids(Datum *ignored_db_names, int ignored_db_names_count, MemoryContext main_ctx);
 static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo);
@@ -28,12 +27,18 @@ static int get_file_sizes_for_databases(List *databases_ids);
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
 
-static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fcinfo) {
+static List *get_collectable_db_ids(Datum *ignored_db_names, int ignored_db_names_count, MemoryContext main_ctx) {
     int retcode;
-    char *sql = "SELECT datname, oid \
+    char sql[MAX_QUERY_SIZE];
+
+    /* fill sql query with ignored dbnames */
+    sprintf(sql, "SELECT datname, oid \
                  FROM pg_database \
-                 WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon')";
-    ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+                 WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon'");
+    for (int i = 0; i < ignored_db_names_count; ++i) {
+        sprintf(sql, "%s, '%s'", sql, DatumGetCString(DirectFunctionCall1(textout, ignored_db_names[i])));
+    }
+    sprintf(sql, "%s)", sql);
 
     /* connect to SPI */
     retcode = SPI_connect();
@@ -51,7 +56,7 @@ static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fci
     }
 
     /* result store arrays */
-    MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+    MemoryContext old_context = MemoryContextSwitchTo(main_ctx);
     List *collectable_db_ids = NIL;
     MemoryContextSwitchTo(old_context);
 
@@ -59,26 +64,13 @@ static List *get_collectable_db_ids(List *ignored_db_names, FunctionCallInfo fci
     bool *tuple_nullable = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_nullable));
 
     for (int i = 0; i < SPI_processed; ++i) {
+        /* fetch tuple from tuptable */
         HeapTuple current_tuple = SPI_tuptable->vals[i];
         heap_deform_tuple(current_tuple, SPI_tuptable->tupdesc, tuple_values, tuple_nullable);
-
-        /* check if datname not in ignored_db_names */
-        bool ignored = false;
-        ListCell *current_cell;
-
-        foreach (current_cell, ignored_db_names) {
-            retcode = strcmp((char *)lfirst(current_cell), DatumGetCString(tuple_values[0]));
-            if (retcode == 0) {
-                ignored = true;
-                break;
-            }
-        }
-
-        if (!ignored) {
-            MemoryContext old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
-            collectable_db_ids = lappend_int(collectable_db_ids, DatumGetInt32(tuple_values[1]));
-            MemoryContextSwitchTo(old_context);
-        }
+        /* store tuple in List */
+        old_context = MemoryContextSwitchTo(main_ctx);
+        collectable_db_ids = lappend_int(collectable_db_ids, DatumGetInt32(tuple_values[1]));
+        MemoryContextSwitchTo(old_context);
     }
 
     pfree(tuple_values);
@@ -267,12 +259,9 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
     get_typlenbyvalalign(elem_type, &elem_width, &elem_type_by_val, &elem_alignment_code);
     deconstruct_array(ignored_db_names_array, elem_type, elem_width, elem_type_by_val, elem_alignment_code,
                       &args_datums, &args_nulls, &args_count);
-    for (int i = 0; i < args_count; ++i) {
-        ignored_db_names =
-            lappend(ignored_db_names, (void *)DatumGetCString(DirectFunctionCall1(textout, args_datums[i])));
-    }
 
-    databases_ids = get_collectable_db_ids(ignored_db_names, fcinfo);
+
+    databases_ids = get_collectable_db_ids(args_datums, args_count, CurrentMemoryContext);
 
     get_file_sizes_for_databases(databases_ids);
 

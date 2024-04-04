@@ -3,6 +3,7 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION gp_relsizes_stats" to load this file. \quit
 
+
 -- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ... 
 
 -- Here go any C or PL/SQL functions, table or view definitions etc
@@ -105,7 +106,6 @@ BEGIN
     -- create info views
     EXECUTE 'SELECT prepare_info_views()';
     -- collect data about tables
-    EXECUTE format('SELECT * FROM collect_table_sizes(
-    (SELECT array_agg(value)::varchar[] FROM unnest(''%s''::text[]) AS value))', $1);
+    PERFORM collect_table_sizes(ignored_dbnames);
 END
 $func$;
