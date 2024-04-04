@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #define MAX_QUERY_SIZE PATH_MAX // obviously 150 is enough (150 > 135 + 10)
+#define FILEINFO_ARGS_CNT 5
 
 PG_MODULE_MAGIC;
 
@@ -144,8 +145,8 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     rsinfo->setResult = tupstore;
     rsinfo->setDesc = tupdesc;
 
-    Datum outputValues[5];
-    bool outputNulls[5];
+    Datum outputValues[FILEINFO_ARGS_CNT];
+    bool outputNulls[eILEINFO_ARGS_CNT];
     MemSet(outputNulls, 0, sizeof(outputNulls));
 
     /* Returns to the old context */
