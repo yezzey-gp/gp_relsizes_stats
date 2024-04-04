@@ -139,17 +139,20 @@ static unsigned int fill_relfilenode(char *name) {
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo) {
     /* if {path} is NULL => return */
     if (!data_dir) {
+        free(data_dir);
         ereport(ERROR, (errmsg("fill_file_sizes: path to datadir is NULL (unexpected behavior)")));
     }
 
     ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
     /* Check to see if caller supports us returning a tuplestore */
     if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo)) {
+        free(data_dir);
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("set-valued function called in context that cannot "
                                                                 "accept a set")));
     }
     if (!(rsinfo->allowedModes & SFRM_Materialize)) {
+        free(data_dir);
         ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR), errmsg("materialize mode required, but it is not allowed "
                                                               "in this context")));
     }
@@ -159,6 +162,7 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     /* Make the output TupleDesc */
     TupleDesc tupdesc;
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        free(data_dir);
         ereport(ERROR, (errmsg("fill_file_sizes: incorrect return type in fcinfo (must be a row type)")));
     }
     tupdesc = BlessTupleDesc(tupdesc);
@@ -187,6 +191,7 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     DIR *current_dir = AllocateDir(data_dir);
     /* if {current_dir} did not opened => return */
     if (!current_dir) {
+        free(data_dir);
         ereport(ERROR, (errmsg("fill_file_sizes: failed to allocate current directory")));
     }
 
@@ -242,17 +247,19 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
  */
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     char cwd[PATH_MAX];
-    char data_dir[PATH_MAX];
+    //char data_dir[PATH_MAX];
+    char *data_dir = NULL;
 
     int segment_id = GpIdentity.segindex;
     int dboid = PG_GETARG_INT32(0);
 
     getcwd(cwd, sizeof(cwd));
-    if (sprintf(data_dir, "%s/base/%d", cwd, dboid) >= sizeof(data_dir)) {
-        ereport(ERROR, (errmsg("get_file_sizes_for_database: failed to write path to data_dir (path too long)")));
+    if (asprintf(&data_dir, "%s/base/%d", cwd, dboid) < 0) {
+        ereport(ERROR, (errmsg("get_file_sizes_for_database: failed to write path to data_dir")));
     }
 
     fill_file_sizes(segment_id, data_dir, fcinfo);
+    free(data_dir);
 
     return (Datum)0;
 }
