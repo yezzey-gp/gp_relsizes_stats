@@ -27,6 +27,9 @@ static int get_file_sizes_for_databases(List *databases_ids);
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
 
+/* get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx)
+ * returns list of availible database names (not ignored)
+ */
 static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx) {
     int retcode;
     char sql[MAX_QUERY_SIZE];
@@ -82,6 +85,9 @@ static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_
 
 static bool is_number(char symbol) { return '0' <= symbol && symbol <= '9'; }
 
+/* fill_relfilenode(char *name) - finds first group of nubers in {name} 
+ * and returns it numeric value
+ */
 static unsigned int fill_relfilenode(char *name) {
     char dst[PATH_MAX];
     memset(dst, 0, PATH_MAX);
@@ -95,9 +101,15 @@ static unsigned int fill_relfilenode(char *name) {
     return strtoul(dst, NULL, 10);
 }
 
+/* fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo)
+ * fills a tupstore with info about file sizes of database on current segment
+ * 
+ * executes on all segments
+ */
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo) {
     /* if {path} is NULL => return */
     if (!data_dir) {
+        ereport(WARNING, (errmsg("fill_file_sizes: path to datadir is NULL (unexpected behavior)")));
         return;
     }
 
@@ -161,12 +173,14 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
 
         /* if limit of PATH_MAX reached skip file */
         if (sprintf(new_path, "%s/%s", data_dir, filename) >= sizeof(new_path)) {
+            ereport(WARNING, (errmsg("fill_file_sizes: path to file is too long (unexpected behavior)")));
             continue;
         }
 
         struct stat stb;
         /* do lstat if returned error => continue */
         if (lstat(new_path, &stb) < 0) {
+            ereport(WARNING, (errmsg("fill_file_sizes: lstat failed (unexpected behavior)")));
             continue;
         }
 
@@ -194,6 +208,11 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
     FreeDir(current_dir);
 }
 
+/* get_file_sizes_for_database(PG_FUNCTION_ARGS)
+ * returns a tupstore with info about file sizes of {dboid} database on current segment
+ *
+ * executes on ALL SEGMENTS
+ */
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     char cwd[PATH_MAX];
     char data_dir[PATH_MAX];
@@ -211,6 +230,14 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     return (Datum) 0;
 }
 
+/* get_file_sizes_for_databases(List *databases_ids)
+ * returns status code 
+ *
+ * start up process of collecting file sizes for each database
+ * and insert result into segment_file_sizes table
+ *
+ * executes on MASTER
+ */
 static int get_file_sizes_for_databases(List *databases_ids) {
     int retcode = 0;
     char query[MAX_QUERY_SIZE];
@@ -242,6 +269,12 @@ static int get_file_sizes_for_databases(List *databases_ids) {
     return retcode;
 }
 
+/* collect_table_sizes(PG_FUNCTION_ARGS)
+ * returns void
+ *
+ * prepare list of databases and start 
+ * get_file_sizes_for_databases
+ */
 Datum collect_table_sizes(PG_FUNCTION_ARGS) {
     bool elem_type_by_val;
     bool *args_nulls;
@@ -259,7 +292,6 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
     get_typlenbyvalalign(elem_type, &elem_width, &elem_type_by_val, &elem_alignment_code);
     deconstruct_array(ignored_dbnames_array, elem_type, elem_width, elem_type_by_val, elem_alignment_code,
                       &ignored_dbnames, &args_nulls, &ignored_dbnames_count);
-
 
     databases_ids = get_collectable_db_ids(ignored_dbnames, ignored_dbnames_count, CurrentMemoryContext);
 
