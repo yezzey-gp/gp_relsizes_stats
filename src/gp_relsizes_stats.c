@@ -9,7 +9,6 @@
 
 #include <sys/stat.h>
 
-#define MAX_QUERY_SIZE PATH_MAX // obviously 150 is enough (150 > 135 + 10)
 #define FILEINFO_ARGS_CNT 5
 
 PG_MODULE_MAGIC;
@@ -33,7 +32,6 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS);
  */
 static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_count, MemoryContext main_ctx) {
     int retcode;
-    //char sql[MAX_QUERY_SIZE], buffer[MAX_QUERY_SIZE];
     char *sql = NULL, *buffer = NULL;
 
     /* fill sql query with ignored dbnames */
@@ -269,7 +267,7 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
  */
 static int get_file_sizes_for_databases(List *databases_ids) {
     int retcode = 0;
-    char query[MAX_QUERY_SIZE];
+    char *sql = NULL;
     ListCell *current_cell;
 
     /* connect to SPI */
@@ -280,12 +278,20 @@ static int get_file_sizes_for_databases(List *databases_ids) {
 
     foreach (current_cell, databases_ids) {
         int dbid = lfirst_int(current_cell);
-        sprintf(query, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
+        retcode = asprintf(&sql, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
                 SELECT * from get_file_sizes_for_database(%d)",
                 dbid);
 
+        if (retcode < 0) {
+            SPI_finish();
+            ereport(ERROR, (errmsg("get_file_sizes_for_databases: failed to write sql query (insert into segment_file_sizes)")));
+        }
+
         /* execute sql query to create table (if it not exists) */
-        retcode = SPI_execute(query, false, 0);
+        retcode = SPI_execute(sql, false, 0);
+
+        /* free dynamic allocated memory */
+        free(sql);
 
         /* check errors if they're occured during execution */
         if (retcode != SPI_OK_INSERT) { /* error */
