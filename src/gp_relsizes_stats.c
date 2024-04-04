@@ -86,7 +86,7 @@ static List *get_collectable_db_ids(Datum *ignored_dbnames, int ignored_dbnames_
 
 static bool is_number(char symbol) { return '0' <= symbol && symbol <= '9'; }
 
-/* fill_relfilenode(char *name) - finds first group of nubers in {name} 
+/* fill_relfilenode(char *name) - finds first group of nubers in {name}
  * and returns it numeric value
  */
 static unsigned int fill_relfilenode(char *name) {
@@ -104,7 +104,7 @@ static unsigned int fill_relfilenode(char *name) {
 
 /* fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo)
  * fills a tupstore with info about file sizes of database on current segment
- * 
+ *
  * executes on all segments
  */
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo) {
@@ -186,7 +186,7 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
         }
 
         if (S_ISREG(stb.st_mode)) {
-            /* If file is regular we should count 
+            /* If file is regular we should count
              * its size and put values into tupstore
              *
              * insert tuple:
@@ -199,7 +199,7 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
             outputValues[4] = Int64GetDatum(stb.st_mtime);
 
             /* Builds the output tuple (row)
-             * and put it in the tuplestore 
+             * and put it in the tuplestore
              */
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
         }
@@ -226,11 +226,11 @@ Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
 
     fill_file_sizes(segment_id, data_dir, fcinfo);
 
-    return (Datum) 0;
+    return (Datum)0;
 }
 
 /* get_file_sizes_for_databases(List *databases_ids)
- * returns status code 
+ * returns status code
  *
  * start up process of collecting file sizes for each database
  * and insert result into segment_file_sizes table
@@ -260,7 +260,8 @@ static int get_file_sizes_for_databases(List *databases_ids) {
         /* check errors if they're occured during execution */
         if (retcode != SPI_OK_INSERT) { /* error */
             SPI_finish();
-            ereport(ERROR, (errmsg("get_file_sizes_for_databases: SPI_execute failed (insert into segment_file_sizes)")));
+            ereport(ERROR,
+                    (errmsg("get_file_sizes_for_databases: SPI_execute failed (insert into segment_file_sizes)")));
         }
     }
 
@@ -271,7 +272,7 @@ static int get_file_sizes_for_databases(List *databases_ids) {
 /* collect_table_sizes(PG_FUNCTION_ARGS)
  * returns void
  *
- * prepare list of databases and start 
+ * prepare list of databases and start
  * get_file_sizes_for_databases
  */
 Datum collect_table_sizes(PG_FUNCTION_ARGS) {
