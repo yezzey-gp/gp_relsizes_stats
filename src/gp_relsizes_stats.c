@@ -247,7 +247,6 @@ static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fci
  */
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS) {
     char cwd[PATH_MAX];
-    //char data_dir[PATH_MAX];
     char *data_dir = NULL;
 
     int segment_id = GpIdentity.segindex;
@@ -285,13 +284,16 @@ static int get_file_sizes_for_databases(List *databases_ids) {
 
     foreach (current_cell, databases_ids) {
         int dbid = lfirst_int(current_cell);
-        retcode = asprintf(&sql, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
+        retcode =
+            asprintf(&sql, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
                 SELECT * from get_file_sizes_for_database(%d)",
-                dbid);
+                     dbid);
 
         if (retcode < 0) {
             SPI_finish();
-            ereport(ERROR, (errmsg("get_file_sizes_for_databases: failed to write sql query (insert into segment_file_sizes)")));
+            ereport(
+                ERROR,
+                (errmsg("get_file_sizes_for_databases: failed to write sql query (insert into segment_file_sizes)")));
         }
 
         /* execute sql query to create table (if it not exists) */
