@@ -326,7 +326,8 @@ static void update_segment_file_map_table() {
         ereport(ERROR, (errmsg("update_segment_file_map_table: failed to write truncate query into sql_truncate")));
     }
 
-    retcode = asprintf(&sql_insert, "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random('pg_class')");
+    retcode = asprintf(&sql_insert, "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode "
+                                    "FROM gp_dist_random('pg_class')");
     if (retcode < 0) {
         ereport(ERROR, (errmsg("update_segment_file_map_table: failed to write insert query into sql_insert")));
     }
