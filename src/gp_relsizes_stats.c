@@ -285,7 +285,7 @@ static int get_file_sizes_for_databases(List *databases_ids) {
     foreach (current_cell, databases_ids) {
         int dbid = lfirst_int(current_cell);
         retcode =
-            asprintf(&sql, "INSERT INTO gp_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
+            asprintf(&sql, "INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) \
                 SELECT * from get_file_sizes_for_database(%d)",
                      dbid);
 

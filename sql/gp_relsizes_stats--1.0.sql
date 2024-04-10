@@ -5,6 +5,7 @@
 
 
 -- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ... 
+CREATE SCHEMA mdb_toolkit;
 
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
@@ -14,17 +15,17 @@ LANGUAGE plpgsql VOLATILE EXECUTE ON MASTER AS
 $func$
 BEGIN
     -- create table, clear if it's exists and fill with actual data
-    EXECUTE 'CREATE TABLE IF NOT EXISTS gp_toolkit.segment_file_map
+    EXECUTE 'CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
         (segment INTEGER, reloid OID, relfilenode OID) 
         WITH (appendonly=true) DISTRIBUTED BY (segment)';
-    EXECUTE 'TRUNCATE TABLE gp_toolkit.segment_file_map';
-    EXECUTE 'INSERT INTO gp_toolkit.segment_file_map 
+    EXECUTE 'TRUNCATE TABLE mdb_toolkit.segment_file_map';
+    EXECUTE 'INSERT INTO mdb_toolkit.segment_file_map 
         SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random(''pg_class'')';
     -- create table and clear if it's exists 
-    EXECUTE 'CREATE TABLE IF NOT EXISTS gp_toolkit.segment_file_sizes
+    EXECUTE 'CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
         (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
         WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY';
-    EXECUTE 'TRUNCATE TABLE gp_toolkit.segment_file_sizes';
+    EXECUTE 'TRUNCATE TABLE mdb_toolkit.segment_file_sizes';
 END
 $func$;
 
@@ -32,7 +33,7 @@ CREATE FUNCTION prepare_info_views() RETURNS VOID
 LANGUAGE plpgsql VOLATILE EXECUTE ON MASTER AS
 $func$
 BEGIN
-    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.table_files AS
+    EXECUTE 'CREATE OR REPLACE VIEW mdb_toolkit.table_files AS
         WITH part_oids AS (
             SELECT n.nspname, c1.relname, c1.oid
             FROM pg_class c1
@@ -76,13 +77,13 @@ BEGIN
         )
         SELECT table_oids.nspname, table_oids.relname, m.segment, m.relfilenode, fs.filepath, kind, size, mtime
         FROM table_oids
-        JOIN gp_toolkit.segment_file_map m ON table_oids.oid = m.reloid
-        JOIN gp_toolkit.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode';
-    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.table_sizes AS
-        SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM gp_toolkit.table_files
+        JOIN mdb_toolkit.segment_file_map m ON table_oids.oid = m.reloid
+        JOIN mdb_toolkit.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode';
+    EXECUTE 'CREATE OR REPLACE VIEW mdb_toolkit.table_sizes AS
+        SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM mdb_toolkit.table_files
         GROUP BY nspname, relname';
-    EXECUTE 'CREATE OR REPLACE VIEW gp_toolkit.namespace_sizes AS
-        SELECT nspname, sum(size) AS size FROM gp_toolkit.table_files
+    EXECUTE 'CREATE OR REPLACE VIEW mdb_toolkit.namespace_sizes AS
+        SELECT nspname, sum(size) AS size FROM mdb_toolkit.table_files
         GROUP BY nspname';
 END
 $func$;
