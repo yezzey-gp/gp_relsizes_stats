@@ -17,7 +17,7 @@ BEGIN
     -- create table, clear if it's exists and fill with actual data
     EXECUTE 'CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
         (segment INTEGER, reloid OID, relfilenode OID) 
-        WITH (appendonly=true) DISTRIBUTED BY (segment)';
+        WITH (appendonly=true) DISTRIBUTED RANDOMLY';
     EXECUTE 'TRUNCATE TABLE mdb_toolkit.segment_file_map';
     EXECUTE 'INSERT INTO mdb_toolkit.segment_file_map 
         SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random(''pg_class'')';
