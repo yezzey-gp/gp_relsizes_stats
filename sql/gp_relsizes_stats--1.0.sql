@@ -11,9 +11,6 @@ CREATE SCHEMA mdb_toolkit;
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
     (segment INTEGER, reloid OID, relfilenode OID) 
     WITH (appendonly=true) DISTRIBUTED RANDOMLY;
-TRUNCATE TABLE mdb_toolkit.segment_file_map;
-INSERT INTO mdb_toolkit.segment_file_map 
-    SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random('pg_class');
 -- create table and clear if it's exists 
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
     (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)

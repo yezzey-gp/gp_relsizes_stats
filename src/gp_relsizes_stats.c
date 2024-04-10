@@ -23,6 +23,7 @@ static bool is_number(char symbol);
 static unsigned int fill_relfilenode(char *name);
 static void fill_file_sizes(int segment_id, char *data_dir, FunctionCallInfo fcinfo);
 static int get_file_sizes_for_databases(List *databases_ids);
+static void update_segment_file_map_table();
 
 Datum get_file_sizes_for_database(PG_FUNCTION_ARGS);
 Datum collect_table_sizes(PG_FUNCTION_ARGS);
@@ -314,6 +315,52 @@ static int get_file_sizes_for_databases(List *databases_ids) {
     return retcode;
 }
 
+static void update_segment_file_map_table() {
+    int retcode = 0;
+    char *sql_truncate = NULL;
+    char *sql_insert = NULL;
+    char *error = NULL;
+
+    retcode = asprintf(&sql_truncate, "TRUNCATE TABLE mdb_toolkit.segment_file_map");
+    if (retcode < 0) {
+        ereport(ERROR, (errmsg("update_segment_file_map_table: failed to write truncate query into sql_truncate")));
+    }
+
+    retcode = asprintf(&sql_insert, "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random('pg_class')");
+    if (retcode < 0) {
+        ereport(ERROR, (errmsg("update_segment_file_map_table: failed to write insert query into sql_insert")));
+    }
+
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        error = "update_segment_file_map_table: SPI_connect failed";
+        goto update_finish;
+    }
+
+    /* truncate table */
+    retcode = SPI_execute(sql_truncate, false, 0);
+    if (retcode != SPI_OK_UTILITY) {
+        error = "update_segment_file_map_table: failed to truncate table";
+        goto update_finish;
+    }
+
+    retcode = SPI_execute(sql_insert, false, 0);
+    if (retcode != SPI_OK_INSERT) {
+        error = "update_segment_file_map_table: failed to insert new rows into table";
+        goto update_finish;
+    }
+
+update_finish:
+    SPI_finish();
+    free(sql_truncate);
+    free(sql_insert);
+
+    if (error != NULL) {
+        ereport(ERROR, (errmsg(error)));
+    }
+}
+
 /* collect_table_sizes(PG_FUNCTION_ARGS)
  * returns void
  *
@@ -340,6 +387,7 @@ Datum collect_table_sizes(PG_FUNCTION_ARGS) {
 
     databases_ids = get_collectable_db_ids(ignored_dbnames, ignored_dbnames_count, CurrentMemoryContext);
 
+    update_segment_file_map_table();
     get_file_sizes_for_databases(databases_ids);
 
     PG_RETURN_VOID();
