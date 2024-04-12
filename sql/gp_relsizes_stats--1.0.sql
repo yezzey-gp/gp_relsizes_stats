@@ -72,12 +72,8 @@ CREATE OR REPLACE VIEW mdb_toolkit.namespace_sizes AS
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:
 
-CREATE FUNCTION get_file_sizes_for_database(dboid INTEGER)
+CREATE FUNCTION get_stats_for_database(dboid INTEGER)
 RETURNS TABLE (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
 AS 'MODULE_PATHNAME', 'get_stats_for_database'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
-CREATE FUNCTION worker_launch(pg_catalog.int4)
-RETURNS pg_catalog.int4 STRICT
-AS 'MODULE_PATHNAME'
-LANGUAGE C;

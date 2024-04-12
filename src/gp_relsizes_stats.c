@@ -36,7 +36,7 @@
 
 PG_MODULE_MAGIC;
 
-PG_FUNCTION_INFO_V1(get_file_sizes_for_database);
+PG_FUNCTION_INFO_V1(get_stats_for_database);
 PG_FUNCTION_INFO_V1(worker_launch);
 
 static void worker_sigterm(SIGNAL_ARGS);
@@ -46,6 +46,7 @@ static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx);
 static int update_segment_file_map_table();
 Datum get_stats_for_database(PG_FUNCTION_ARGS);
 static void get_stats_for_databases(Datum *databases_oids, int databases_cnt);
+static bool plugin_created();
 static void collect_stats(Datum main_arg);
 void _PG_init(void);
 Datum worker_launch(PG_FUNCTION_ARGS);
@@ -55,8 +56,8 @@ void _PG_fini(void);
 static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
-static int worker_main_naptime = 1 * MINUTE_SECONDS;
-static int worker_sub_naptime = 1 * MINUTE_SECONDS;
+static int worker_main_naptime = 0; /* set up in _PG_init() function */
+static int worker_sub_naptime = 0; /* set up in _PG_init() function */
 
 static void worker_sigterm(SIGNAL_ARGS) {
     int save_errno = errno;
@@ -105,7 +106,7 @@ static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx) {
     
     /* prepare for coping datum variables */
     bool typByVal;
-    int typLen;
+    int16 typLen;
     char typAlign;
 
     /* allocate memory for result */
@@ -208,6 +209,7 @@ static unsigned int fill_relfilenode(char *name) {
     }
     while (pos < strlen(name) && is_number(name[pos])) {
         result = (result * 10 + (name[pos] - '0'));
+        ++pos;
     }
     return result;
 }
@@ -300,6 +302,7 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
             * insert tuple:
             * (segment_is, relfilenode, file_path, stb.st_size, stb.st_mtime)
             */
+
             outputValues[0] = Int32GetDatum(segment_id);
             outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
             outputValues[2] = CStringGetTextDatum(file_path);
@@ -362,7 +365,7 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
             continue;
         }
 
-        retcode = asprintf(&sql, "INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) SELECT * from get_file_sizes_for_database(%d)", dboid);
+        retcode = asprintf(&sql, "INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) SELECT * FROM get_stats_for_database(%d)", dboid);
         if (retcode < 0) {
             error = "get_stats_for_databases: failed to write insert query (insert into segment_file_sizes)";
             goto finish_spi;
@@ -406,11 +409,49 @@ finish_transaction:
     }
 }
 
+static bool plugin_created() {
+    int retcode = 0;
+    char *sql = "SELECT * FROM pg_extension WHERE extname = 'gp_relsizes_stats'";
+    char *error = NULL;
+
+    /* get timestamp and start transaction */
+    SetCurrentStatementStartTimestamp();
+    StartTransactionCommand();
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        error = "get_stats_for_databases: SPI_connect failed";
+        goto finish_transaction;
+    }
+    PushActiveSnapshot(GetTransactionSnapshot());
+    pgstat_report_activity(STATE_RUNNING, sql);
+
+    retcode = SPI_execute(sql, true, 0);
+    if (retcode != SPI_OK_SELECT || SPI_processed < 0) { /* error */
+        error = "get_stats_for_databases: SPI_execute failed (failed to check if plugin created)";
+        goto finish_spi;
+    }
+
+    retcode = SPI_processed;
+finish_spi:
+    SPI_finish();
+finish_transaction:
+    PopActiveSnapshot();
+    CommitTransactionCommand();
+    pgstat_report_stat(false);
+    pgstat_report_activity(STATE_IDLE, NULL);
+
+    if (error != NULL) {
+        ereport(ERROR, (errmsg(error)));
+    }
+    
+    return (retcode > 0);
+}
+
 void collect_stats(Datum main_arg) {
     int retcode = 0;
-
-    Datum *databases_oids;
     int databases_cnt;
+    Datum *databases_oids;
 
     /* Establish signal handlers before unblocking signals. */
     pqsignal(SIGTERM, worker_sigterm);
@@ -422,6 +463,11 @@ void collect_stats(Datum main_arg) {
     BackgroundWorkerInitializeConnection("postgres", NULL);
 
     for (;;) {
+        /* check if plugin created => start working else napping until it will be started */
+        if (!plugin_created()) {
+            goto naptime;
+        }
+
         /* get list of available databases */
         databases_oids = get_databases_oids(&databases_cnt, CurrentMemoryContext);
 
@@ -434,6 +480,7 @@ void collect_stats(Datum main_arg) {
         /* free databases_oids array */
         pfree(databases_oids);
 
+naptime:
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_main_naptime * 1000L);
         ResetLatch(&MyProc->procLatch); 
 
@@ -453,7 +500,7 @@ void _PG_init(void) {
                             "Duration between each check-phase for databases (in seconds).",
                             NULL,
                             &worker_main_naptime,
-                            2 * HOUR_SECONDS,
+                            MINUTE_SECONDS,
                             1,
                             INT_MAX,
                             PGC_SIGHUP,
@@ -465,7 +512,7 @@ void _PG_init(void) {
                             "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
                             NULL,
                             &worker_sub_naptime,
-                            10 * HOUR_SECONDS,
+                            MINUTE_SECONDS,
                             1,
                             INT_MAX,
                             PGC_SIGHUP,
@@ -492,49 +539,6 @@ void _PG_init(void) {
     snprintf(worker.bgw_name, BGW_MAXLEN, "gp_relsizes_stats_worker");
     worker.bgw_main_arg = Int32GetDatum(0);
     RegisterBackgroundWorker(&worker);
-}
-
-Datum worker_launch(PG_FUNCTION_ARGS) {
-    int32 i = PG_GETARG_INT32(0);
-    BackgroundWorker worker;
-    BackgroundWorkerHandle *handle;
-    BgwHandleStatus status;
-    pid_t       pid;
-
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-        BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    worker.bgw_restart_time = BGW_NEVER_RESTART;
-    worker.bgw_main = NULL;     /* new worker might not have library loaded */
-    sprintf(worker.bgw_library_name, "gp_relsizes_stats");
-    sprintf(worker.bgw_function_name, "collect_stats");
-    snprintf(worker.bgw_name, BGW_MAXLEN, "gp_relsizes_stats_worker");
-    worker.bgw_main_arg = Int32GetDatum(i);
-    /* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
-    worker.bgw_notify_pid = MyProcPid;
-
-    if (!RegisterDynamicBackgroundWorker(&worker, &handle)) {
-        PG_RETURN_NULL();
-    }
-
-    status = WaitForBackgroundWorkerStartup(handle, &pid);
-
-    if (status == BGWH_STOPPED) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-                errmsg("could not start background process"),
-                errhint("More details may be available in the server log.")));
-
-    }
-    if (status == BGWH_POSTMASTER_DIED) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-                errmsg("cannot start background processes without postmaster"),
-                errhint("Kill all remaining database processes and restart the database.")));
-
-    }
-    Assert(status == BGWH_STARTED);
-    PG_RETURN_INT32(pid);
 }
 
 void _PG_fini(void) {
