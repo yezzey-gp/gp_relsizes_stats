@@ -500,7 +500,7 @@ void _PG_init(void) {
                             "Duration between each check-phase for databases (in seconds).",
                             NULL,
                             &worker_main_naptime,
-                            MINUTE_SECONDS,
+                            MINUTE_SECONDS, /* set naptime between check-phase (in seconds) */
                             1,
                             INT_MAX,
                             PGC_SIGHUP,
@@ -512,7 +512,7 @@ void _PG_init(void) {
                             "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
                             NULL,
                             &worker_sub_naptime,
-                            MINUTE_SECONDS,
+                            MINUTE_SECONDS, /* set naptime between collecting stats of databases (in seconds) */
                             1,
                             INT_MAX,
                             PGC_SIGHUP,
