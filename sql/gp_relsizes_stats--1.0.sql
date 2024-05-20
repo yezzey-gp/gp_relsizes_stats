@@ -5,13 +5,13 @@
 
 
 -- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ... 
-CREATE SCHEMA mdb_toolkit;
+CREATE SCHEMA IF NOT EXISTS mdb_toolkit;
 
--- create table, clear if it's exists and fill with actual data
+-- create table
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
     (segment INTEGER, reloid OID, relfilenode OID) 
     WITH (appendonly=true) DISTRIBUTED RANDOMLY;
--- create table and clear if it's exists 
+-- create table 
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
     (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
     WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;

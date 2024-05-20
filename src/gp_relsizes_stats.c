@@ -15,9 +15,9 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "pgstat.h"
+#include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
-#include "tcop/utility.h"
 
 #include "cdb/cdbvars.h"
 #include "commands/defrem.h"
@@ -33,14 +33,13 @@
 #define FILEINFO_ARGS_CNT 5
 #define HOUR_SECONDS 3600
 #define MINUTE_SECONDS 60
+#define FILE_NAPTIME 10000000 // 10 seconds
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(get_stats_for_database);
-PG_FUNCTION_INFO_V1(worker_launch);
 
 static void worker_sigterm(SIGNAL_ARGS);
-Datum copy_datum(Datum originalDatum, Oid datumType);
 
 static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx);
 static int update_segment_file_map_table();
@@ -53,15 +52,13 @@ Datum worker_launch(PG_FUNCTION_ARGS);
 void _PG_fini(void);
 
 /* flags set by signal handlers */
-static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
 static int worker_main_naptime = 0; /* set up in _PG_init() function */
-static int worker_sub_naptime = 0; /* set up in _PG_init() function */
+static int worker_sub_naptime = 0;  /* set up in _PG_init() function */
 
 static void worker_sigterm(SIGNAL_ARGS) {
     int save_errno = errno;
-    got_sigterm = true;
     if (MyProc) {
         SetLatch(&MyProc->procLatch);
     }
@@ -70,7 +67,8 @@ static void worker_sigterm(SIGNAL_ARGS) {
 
 static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx) {
     int retcode = 0;
-    char *sql = "SELECT datname, oid FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'diskquota', 'gpperfmon')";
+    char *sql = "SELECT datname, oid FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'diskquota', "
+                "'gpperfmon')";
     char *error = NULL;
 
     MemoryContext old_context = MemoryContextSwitchTo(ctx);
@@ -103,7 +101,7 @@ static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx) {
     /* current store  */
     Datum *tuple_values = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_values));
     bool *tuple_nullable = palloc0(SPI_tuptable->tupdesc->natts * sizeof(*tuple_nullable));
-    
+
     /* prepare for coping datum variables */
     bool typByVal;
     int16 typLen;
@@ -143,7 +141,7 @@ finish_transaction:
     pgstat_report_activity(STATE_IDLE, NULL);
 
     if (error != NULL) {
-        ereport(ERROR, (errmsg(error)));
+        ereport(ERROR, (errmsg("%s: %m", error)));
     }
 
     return databases_oids;
@@ -152,7 +150,8 @@ finish_transaction:
 static int update_segment_file_map_table() {
     int retcode = 0;
     char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_map";
-    char *sql_insert = "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM gp_dist_random('pg_class')";
+    char *sql_insert = "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM "
+                       "gp_dist_random('pg_class')";
     char *error = NULL;
 
     /* get timestamp and start transaction */
@@ -191,7 +190,7 @@ finish_transaction:
     pgstat_report_activity(STATE_IDLE, NULL);
 
     if (error != NULL) {
-        ereport(ERROR, (errmsg(error)));
+        ereport(ERROR, (errmsg("%s: %m", error)));
     }
 
     return retcode;
@@ -200,8 +199,8 @@ finish_transaction:
 static bool is_number(char symbol) { return '0' <= symbol && symbol <= '9'; }
 
 /* fill_relfilenode(char *name) - finds first group of nubers in {name}
-* and returns it numeric value
-*/
+ * and returns it numeric value
+ */
 static unsigned int fill_relfilenode(char *name) {
     unsigned int result = 0, pos = 0;
     while (pos < strlen(name) && !is_number(name[pos])) {
@@ -215,22 +214,16 @@ static unsigned int fill_relfilenode(char *name) {
 }
 
 Datum get_stats_for_database(PG_FUNCTION_ARGS) {
-    int retcode = 0;
     int segment_id = GpIdentity.segindex;
     int dboid = PG_GETARG_INT32(0);
 
     char cwd[PATH_MAX];
     char *data_dir = NULL;
     char *error = NULL;
-    char file_path[PATH_MAX];
+    char *file_path = NULL;
 
     getcwd(cwd, sizeof(cwd));
-    retcode = asprintf(&data_dir, "%s/base/%d", cwd, dboid);
-    if (retcode < 0) {
-        error = "get_stats_for_database: failed to write path to data_dir";
-        goto finish;
-    }
-
+    data_dir = psprintf("%s/base/%d", cwd, dboid);
     ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
     /* Check to see if caller supports us returning a tuplestore */
     if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo)) {
@@ -247,6 +240,7 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
     /* Make the output TupleDesc */
     TupleDesc tupdesc;
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        MemoryContextSwitchTo(oldcontext);
         error = "get_stats_for_database: incorrect return type in fcinfo (must be a row type)";
         goto finish_data;
     }
@@ -279,29 +273,26 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
     /* start itterating in {current_dir} */
     while ((file = ReadDir(current_dir, data_dir)) != NULL) {
         char *filename = file->d_name;
-        if (strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) { /* if filename is special as "." or ".." => continue */
+        if (strcmp(filename, ".") == 0 ||
+            strcmp(filename, "..") == 0) { /* if filename is special as "." or ".." => continue */
             continue;
         }
 
-        retcode = sprintf(file_path, "%s/%s", data_dir, filename); 
-        if (retcode >= sizeof(file_path)) { /* if limit of PATH_MAX reached skip file */
-            ereport(WARNING, (errmsg("get_stats_for_database: path to file is too long (unexpected behavior)"))); 
-            continue;
-        }
-
+        file_path = psprintf("%s/%s", data_dir, filename);
         struct stat stb;
         if (lstat(file_path, &stb) < 0) { /* do lstat if returned error => continue */
             ereport(WARNING, (errmsg("get_stats_for_database: lstat failed (unexpected behavior)")));
             continue;
         }
+        pfree(file_path);
 
         if (S_ISREG(stb.st_mode)) {
             /* If file is regular we should count
-            * its size and put values into tupstore
-            *
-            * insert tuple:
-            * (segment_is, relfilenode, file_path, stb.st_size, stb.st_mtime)
-            */
+             * its size and put values into tupstore
+             *
+             * insert tuple:
+             * (segment_is, relfilenode, file_path, stb.st_size, stb.st_mtime)
+             */
 
             outputValues[0] = Int32GetDatum(segment_id);
             outputValues[1] = ObjectIdGetDatum(fill_relfilenode(filename));
@@ -310,18 +301,18 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
             outputValues[4] = Int64GetDatum(stb.st_mtime);
 
             /* Builds the output tuple (row)
-            * and put it in the tuplestore
-            */
+             * and put it in the tuplestore
+             */
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
+            // pg_usleep(FILE_NAPTIME);
         }
     }
 
     FreeDir(current_dir);
 finish_data:
-    free(data_dir);
-finish:
+    pfree(data_dir);
     if (error != NULL) {
-        ereport(ERROR, (errmsg(error)));
+        ereport(ERROR, (errmsg("%s: %m", error)));
     }
 
     return (Datum)0;
@@ -348,11 +339,7 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
         char *dbname = NameStr(*DatumGetName(databases_oids[2 * i]));
         int dboid = DatumGetInt32(databases_oids[2 * i + 1]);
 
-        retcode = asprintf(&sql, "SELECT 1 FROM pg_database WHERE oid = %d AND datname = '%s'", dboid, dbname);
-        if (retcode < 0) {
-            error = "get_stats_for_databases: failed to write exist-verify query into buffer";
-            goto finish_spi;
-        }
+        sql = psprintf("SELECT 1 FROM pg_database WHERE oid = %d AND datname = '%s'", dboid, dbname);
         pgstat_report_activity(STATE_RUNNING, sql);
 
         retcode = SPI_execute(sql, true, 0);
@@ -365,12 +352,10 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
             continue;
         }
 
-        retcode = asprintf(&sql, "INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) SELECT * FROM get_stats_for_database(%d)", dboid);
-        if (retcode < 0) {
-            error = "get_stats_for_databases: failed to write insert query (insert into segment_file_sizes)";
-            goto finish_spi;
-        }
-
+        pfree(sql);
+        sql = psprintf("INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
+                       "SELECT * FROM get_stats_for_database(%d)",
+                       dboid);
         retcode = SPI_execute(sql, false, 0);
         if (retcode != SPI_OK_INSERT) {
             error = "get_stats_for_databases: SPI_execute failed (insert into segment_file_sizes)";
@@ -383,8 +368,9 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
         pgstat_report_stat(false);
         pgstat_report_activity(STATE_IDLE, NULL);
 
-        retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, (worker_sub_naptime / databases_cnt) * 1000L);
-        ResetLatch(&MyProc->procLatch); 
+        retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+                            (worker_sub_naptime / databases_cnt) * 1000L);
+        ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
         if (retcode & WL_POSTMASTER_DEATH) {
@@ -401,11 +387,11 @@ finish_transaction:
     pgstat_report_activity(STATE_IDLE, NULL);
 
     if (sql != NULL) {
-        free(sql);
+        pfree(sql);
     }
 
     if (error != NULL) {
-        ereport(ERROR, (errmsg(error)));
+        ereport(ERROR, (errmsg("%s: %m", error)));
     }
 }
 
@@ -442,9 +428,9 @@ finish_transaction:
     pgstat_report_activity(STATE_IDLE, NULL);
 
     if (error != NULL) {
-        ereport(ERROR, (errmsg(error)));
+        ereport(ERROR, (errmsg("%s: %m", error)));
     }
-    
+
     return (retcode > 0);
 }
 
@@ -480,55 +466,39 @@ void collect_stats(Datum main_arg) {
         /* free databases_oids array */
         pfree(databases_oids);
 
-naptime:
-        retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_main_naptime * 1000L);
-        ResetLatch(&MyProc->procLatch); 
+    naptime:
+        retcode =
+            WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_main_naptime * 1000L);
+        ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
         if (retcode & WL_POSTMASTER_DEATH) {
             proc_exit(1);
         }
     }
-} 
+}
 
 void _PG_init(void) {
-    // nothing to do here for this template, but usually we register hooks here,
-    // allocate shared memory, start background workers, etc
+    /* allocate shared memory, start background workers, etc */
     BackgroundWorker worker;
- 
+
     DefineCustomIntVariable("gp_relsizes_stats.main_naptime",
-                            "Duration between each check-phase for databases (in seconds).",
-                            NULL,
-                            &worker_main_naptime,
+                            "Duration between each check-phase for databases (in seconds).", NULL, &worker_main_naptime,
                             MINUTE_SECONDS, /* set naptime between check-phase (in seconds) */
-                            1,
-                            INT_MAX,
-                            PGC_SIGHUP,
-                            0,
-                            NULL,
-                            NULL,
-                            NULL);
-    DefineCustomIntVariable("gp_relsizes_stats.sub_naptime",
-                            "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
-                            NULL,
-                            &worker_sub_naptime,
-                            MINUTE_SECONDS, /* set naptime between collecting stats of databases (in seconds) */
-                            1,
-                            INT_MAX,
-                            PGC_SIGHUP,
-                            0,
-                            NULL,
-                            NULL,
-                            NULL);
+                            1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
+    DefineCustomIntVariable(
+        "gp_relsizes_stats.sub_naptime",
+        "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
+        NULL, &worker_sub_naptime, MINUTE_SECONDS, /* set naptime between collecting stats of databases (in seconds) */
+        1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress) {
         return;
-    } 
+    }
 
     /* set up common data for our worker */
     memset(&worker, 0, sizeof(worker));
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-            BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
     worker.bgw_main = collect_stats;

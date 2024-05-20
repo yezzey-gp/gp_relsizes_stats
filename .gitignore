@@ -4,4 +4,3 @@ src/protos/
 results
 .vscode
 compile_commands.json
-.clang-format
