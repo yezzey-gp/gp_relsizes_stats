@@ -458,7 +458,11 @@ void collect_stats(Datum main_arg) {
         databases_oids = get_databases_oids(&databases_cnt, CurrentMemoryContext);
 
         /* update table with mappings (they could be new) */
-        retcode = update_segment_file_map_table();
+        PG_TRY();
+        {
+            retcode = update_segment_file_map_table();
+        }
+        PG_END_TRY();
 
         /* get stats for all available databases */
         get_stats_for_databases(databases_oids, databases_cnt);
