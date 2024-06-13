@@ -71,10 +71,8 @@ static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx) {
                 "'gpperfmon')";
     char *error = NULL;
 
-    MemoryContext old_context = MemoryContextSwitchTo(ctx);
     Datum *databases_oids = NULL;
     *databases_cnt = 0;
-    MemoryContextSwitchTo(old_context);
 
     /* get timestamp and start transaction */
     SetCurrentStatementStartTimestamp();

@@ -4,14 +4,14 @@
 \echo Use "CREATE EXTENSION gp_relsizes_stats" to load this file. \quit
 
 
--- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ... 
+-- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ...
 CREATE SCHEMA IF NOT EXISTS mdb_toolkit;
 
 -- create table
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
-    (segment INTEGER, reloid OID, relfilenode OID) 
+    (segment INTEGER, reloid OID, relfilenode OID)
     WITH (appendonly=true) DISTRIBUTED RANDOMLY;
--- create table 
+-- create table
 CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
     (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
     WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;
