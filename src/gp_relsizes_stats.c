@@ -23,17 +23,16 @@
 #include "funcapi.h"
 
 #include "utils/builtins.h"
-#include "utils/builtins.h"
-#include "utils/lsyscache.h"
 #include "utils/datum.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
 
 #include <sys/stat.h>
 
 #define FILEINFO_ARGS_CNT 5
-#define HOUR_SECONDS 3600
-#define MINUTE_SECONDS 60
+#define HOUR_TIME 3600
+#define MINUTE_TIME 60
 #define FILE_NAPTIME 10000000 // 10 seconds
 
 PG_MODULE_MAGIC;
@@ -55,9 +54,10 @@ void _PG_fini(void);
 /* flags set by signal handlers */
 
 /* GUC variables */
-static int worker_main_naptime = 0; /* set up in _PG_init() function */
-static int worker_sub_naptime = 0;  /* set up in _PG_init() function */
-static bool extension_enabled = false; /* set up in _PG_init() function */
+static int worker_restart_naptime = 0;  /* set up in _PG_init() function */
+static int worker_database_naptime = 0; /* set up in _PG_init() function */
+static int worker_file_naptime = 0;     /* set up in _PG_init() function */
+static bool extension_enabled = false;  /* set up in _PG_init() function */
 
 static void worker_sigterm(SIGNAL_ARGS) {
     int save_errno = errno;
@@ -214,6 +214,7 @@ static unsigned int fill_relfilenode(char *name) {
 }
 
 Datum get_stats_for_database(PG_FUNCTION_ARGS) {
+    int retcode;
     int segment_id = GpIdentity.segindex;
     int dboid = PG_GETARG_INT32(0);
 
@@ -304,7 +305,16 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
              * and put it in the tuplestore
              */
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
-            // pg_usleep(FILE_NAPTIME);
+
+            /* sleep between file proccessing */
+            retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+                                worker_file_naptime * 1000L);
+            ResetLatch(&MyProc->procLatch);
+
+            /* emergency bailout if postmaster has died */
+            if (retcode & WL_POSTMASTER_DEATH) {
+                proc_exit(1);
+            }
         }
     }
 
@@ -369,7 +379,7 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
         pgstat_report_activity(STATE_IDLE, NULL);
 
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-                            (worker_sub_naptime / databases_cnt) * 1000L);
+                            (worker_database_naptime / databases_cnt) * 1000L);
         ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
@@ -463,9 +473,7 @@ void collect_stats(Datum main_arg) {
 
         /* update table with mappings (they could be new) */
         PG_TRY();
-        {
-            retcode = update_segment_file_map_table();
-        }
+        { retcode = update_segment_file_map_table(); }
         PG_END_TRY();
 
         /* get stats for all available databases */
@@ -475,8 +483,8 @@ void collect_stats(Datum main_arg) {
         pfree(databases_oids);
 
     naptime:
-        retcode =
-            WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_main_naptime * 1000L);
+        retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+                            worker_restart_naptime * 1000L);
         ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
@@ -487,34 +495,29 @@ void collect_stats(Datum main_arg) {
 }
 
 void _PG_init(void) {
-    DefineCustomBoolVariable("gp_relsizes_stats.enabled",
-                             "Enable feature for extension",
-                             NULL,
-                             &extension_enabled,
-                             false,
-                             PGC_SIGHUP,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL,
-                             NULL,
-                             NULL);
-
-
-    /* allocate shared memory, start background workers, etc */
-    BackgroundWorker worker;
-
-    DefineCustomIntVariable("gp_relsizes_stats.main_naptime",
-                            "Duration between each check-phase for databases (in seconds).", NULL, &worker_main_naptime,
-                            10, /* set naptime between check-phase (in seconds) */
+    /* define GUC extension enable flag */
+    DefineCustomBoolVariable("gp_relsizes_stats.enabled", "Enable extension flag", NULL, &extension_enabled, false,
+                             PGC_SIGHUP, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+    /* define GUC naptime variables */
+    DefineCustomIntVariable("gp_relsizes_stats.restart_naptime", "Duration between every collect-phases (in sec).",
+                            NULL, &worker_restart_naptime,
+                            6 * HOUR_TIME, /* set naptime between check-phase (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
-    DefineCustomIntVariable("gp_relsizes_stats.sub_naptime",
-        "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
-        NULL, &worker_sub_naptime, MINUTE_SECONDS, /* set naptime between collecting stats of databases (in seconds) */
-        1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
+    DefineCustomIntVariable("gp_relsizes_stats.database_naptime", "Duration between collect-phase for db (in sec).",
+                            NULL, &worker_database_naptime,
+                            HOUR_TIME, /* set naptime between collecting stats of databases (in seconds) */
+                            1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
+    DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in sec).",
+                            NULL, &worker_file_naptime,
+                            2 * MINUTE_TIME, /* set naptime between check-phase (in seconds) */
+                            1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress) {
         return;
     }
 
+    /* allocate shared memory, start background workers, etc */
+    BackgroundWorker worker;
     /* set up common data for our worker */
     memset(&worker, 0, sizeof(worker));
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
