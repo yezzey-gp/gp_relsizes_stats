@@ -16,17 +16,18 @@
 #include "lib/stringinfo.h"
 #include "pgstat.h"
 #include "tcop/utility.h"
-#include "utils/builtins.h"
-#include "utils/snapmgr.h"
 
 #include "cdb/cdbvars.h"
 #include "commands/defrem.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+
+#include "utils/builtins.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-
 #include "utils/datum.h"
+#include "utils/guc.h"
+#include "utils/snapmgr.h"
 
 #include <sys/stat.h>
 
@@ -56,6 +57,7 @@ void _PG_fini(void);
 /* GUC variables */
 static int worker_main_naptime = 0; /* set up in _PG_init() function */
 static int worker_sub_naptime = 0;  /* set up in _PG_init() function */
+static bool extension_enabled = false; /* set up in _PG_init() function */
 
 static void worker_sigterm(SIGNAL_ARGS) {
     int save_errno = errno;
@@ -107,7 +109,7 @@ static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx) {
 
     /* allocate memory for result */
     *databases_cnt = SPI_processed;
-    old_context = MemoryContextSwitchTo(ctx);
+    MemoryContext old_context = MemoryContextSwitchTo(ctx);
     databases_oids = palloc0(SPI_tuptable->tupdesc->natts * (*databases_cnt) * sizeof(*databases_oids));
     MemoryContextSwitchTo(old_context);
 
@@ -435,6 +437,7 @@ finish_transaction:
 void collect_stats(Datum main_arg) {
     int retcode = 0;
     int databases_cnt;
+    char *extension_enabled_option = NULL;
     Datum *databases_oids;
 
     /* Establish signal handlers before unblocking signals. */
@@ -447,8 +450,11 @@ void collect_stats(Datum main_arg) {
     BackgroundWorkerInitializeConnection("postgres", NULL);
 
     for (;;) {
-        /* check if plugin created => start working else napping until it will be started */
-        if (!plugin_created()) {
+        extension_enabled_option = GetConfigOptionByName("gp_relsizes_stats.enabled", NULL);
+        /* check if plugin created and extension enabled => start working
+         * else napping until it will be started
+         */
+        if (strcmp(extension_enabled_option, "on") != 0 || !plugin_created()) {
             goto naptime;
         }
 
@@ -481,15 +487,26 @@ void collect_stats(Datum main_arg) {
 }
 
 void _PG_init(void) {
+    DefineCustomBoolVariable("gp_relsizes_stats.enabled",
+                             "Enable feature for extension",
+                             NULL,
+                             &extension_enabled,
+                             false,
+                             PGC_SIGHUP,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL,
+                             NULL,
+                             NULL);
+
+
     /* allocate shared memory, start background workers, etc */
     BackgroundWorker worker;
 
     DefineCustomIntVariable("gp_relsizes_stats.main_naptime",
                             "Duration between each check-phase for databases (in seconds).", NULL, &worker_main_naptime,
-                            MINUTE_SECONDS, /* set naptime between check-phase (in seconds) */
+                            10, /* set naptime between check-phase (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
-    DefineCustomIntVariable(
-        "gp_relsizes_stats.sub_naptime",
+    DefineCustomIntVariable("gp_relsizes_stats.sub_naptime",
         "Summary duration after collecting info about database (for all databases in one check-phase, in seconds).",
         NULL, &worker_sub_naptime, MINUTE_SECONDS, /* set naptime between collecting stats of databases (in seconds) */
         1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
