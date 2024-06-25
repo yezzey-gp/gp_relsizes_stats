@@ -416,7 +416,7 @@ static bool plugin_created() {
     /* connect to SPI */
     retcode = SPI_connect();
     if (retcode < 0) { /* error */
-        error = "get_stats_for_databases: SPI_connect failed";
+        error = "plugin_created: SPI_connect failed";
         goto finish_transaction;
     }
     PushActiveSnapshot(GetTransactionSnapshot());
@@ -424,7 +424,7 @@ static bool plugin_created() {
 
     retcode = SPI_execute(sql, true, 0);
     if (retcode != SPI_OK_SELECT || SPI_processed < 0) { /* error */
-        error = "get_stats_for_databases: SPI_execute failed (failed to check if plugin created)";
+        error = "plugin_created: SPI_execute failed (failed to check if plugin created)";
         goto finish_spi;
     }
 
@@ -482,6 +482,7 @@ void collect_stats(Datum main_arg) {
         /* free databases_oids array */
         pfree(databases_oids);
 
+
     naptime:
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
                             worker_restart_naptime * 1000L);
@@ -491,6 +492,10 @@ void collect_stats(Datum main_arg) {
         if (retcode & WL_POSTMASTER_DEATH) {
             proc_exit(1);
         }
+
+        // TODO truncate or rework idea of extension
+        // need rework, it's bad idea to truncate tables (lost data)
+        // maybe put data in backup tables and after truncate current tables
     }
 }
 
