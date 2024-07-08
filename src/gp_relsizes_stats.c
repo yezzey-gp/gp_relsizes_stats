@@ -282,8 +282,9 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
         file_path = psprintf("%s/%s", data_dir, filename);
         struct stat stb;
         if (lstat(file_path, &stb) < 0) { /* do lstat if returned error => continue */
+            ereport(WARNING,
+                    (errmsg("get_stats_for_database: lstat failed with %s file (unexpected behavior)", file_path)));
             pfree(file_path);
-            ereport(WARNING, (errmsg("get_stats_for_database: lstat failed (unexpected behavior)")));
             continue;
         }
         pfree(file_path);
@@ -482,7 +483,6 @@ void collect_stats(Datum main_arg) {
 
         /* free databases_oids array */
         pfree(databases_oids);
-
 
     naptime:
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
