@@ -282,6 +282,7 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
         file_path = psprintf("%s/%s", data_dir, filename);
         struct stat stb;
         if (lstat(file_path, &stb) < 0) { /* do lstat if returned error => continue */
+            pfree(file_path);
             ereport(WARNING, (errmsg("get_stats_for_database: lstat failed (unexpected behavior)")));
             continue;
         }
