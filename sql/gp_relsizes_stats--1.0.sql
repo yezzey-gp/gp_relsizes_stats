@@ -16,6 +16,12 @@ CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
     (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
     WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;
 TRUNCATE TABLE mdb_toolkit.segment_file_sizes;
+-- create table
+CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes_history
+    (ts TIMESTAMPTZ, segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
+    WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;
+TRUNCATE TABLE mdb_toolkit.segment_file_sizes_history;
+
 
 CREATE OR REPLACE VIEW mdb_toolkit.table_files AS
     WITH part_oids AS (
