@@ -165,8 +165,9 @@ static int update_segment_file_map_table() {
         goto finish_transaction;
     }
     PushActiveSnapshot(GetTransactionSnapshot());
-    pgstat_report_activity(STATE_RUNNING, sql_truncate);
 
+    /* update report activity */
+    pgstat_report_activity(STATE_RUNNING, sql_truncate);
     /* truncate table */
     retcode = SPI_execute(sql_truncate, false, 0);
     if (retcode != SPI_OK_UTILITY) {
@@ -174,6 +175,8 @@ static int update_segment_file_map_table() {
         goto finish_spi;
     }
 
+    /* update report activity */
+    pgstat_report_activity(STATE_RUNNING, sql_insert);
     /* insert new rows */
     retcode = SPI_execute(sql_insert, false, 0);
     if (retcode != SPI_OK_INSERT) {
@@ -368,6 +371,7 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
         sql = psprintf("INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
                        "SELECT * FROM get_stats_for_database(%d)",
                        dboid);
+        pgstat_report_activity(STATE_RUNNING, sql);
         retcode = SPI_execute(sql, false, 0);
         if (retcode != SPI_OK_INSERT) {
             error = "get_stats_for_databases: SPI_execute failed (insert into segment_file_sizes)";
@@ -446,6 +450,53 @@ finish_transaction:
     return (retcode > 0);
 }
 
+static void put_collected_data_into_history() {
+    int retcode = 0;
+    char *sql_insert =
+        "INSERT INTO mdb_toolkit.segment_file_sizes_history SELECT now(), * FROM mdb_toolkit.segment_file_sizes";
+    char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_sizes";
+    char *error = NULL;
+
+    /* get timestamp and start transaction */
+    SetCurrentStatementStartTimestamp();
+    StartTransactionCommand();
+    /* connect to SPI */
+    retcode = SPI_connect();
+    if (retcode < 0) { /* error */
+        error = "put_collected_data_into_history: SPI_connect failed";
+        goto finish_transaction;
+    }
+    PushActiveSnapshot(GetTransactionSnapshot());
+
+    /* update report activity */
+    pgstat_report_activity(STATE_RUNNING, sql_insert);
+    retcode = SPI_execute(sql_insert, false, 0);
+    if (retcode != SPI_OK_INSERT || SPI_processed < 0) { /* error */
+        error = "put_collected_data_into_history: SPI_execute failed (failed to insert data into history table)";
+        goto finish_spi;
+    }
+
+    /* update report activity */
+    pgstat_report_activity(STATE_RUNNING, sql_truncate);
+    retcode = SPI_execute(sql_truncate, false, 0);
+    if (retcode != SPI_OK_UTILITY || SPI_processed < 0) { /* error */
+        error = "put_collected_data_into_history: SPI_execute failed (failed to truncate actual table)";
+        goto finish_spi;
+    }
+
+finish_spi:
+    SPI_finish();
+finish_transaction:
+    PopActiveSnapshot();
+    CommitTransactionCommand();
+    pgstat_report_stat(false);
+    pgstat_report_activity(STATE_IDLE, NULL);
+
+    if (error != NULL) {
+        ereport(ERROR, (errmsg("%s: %m", error)));
+    }
+}
+
 void collect_stats(Datum main_arg) {
     int retcode = 0;
     int databases_cnt;
@@ -463,6 +514,7 @@ void collect_stats(Datum main_arg) {
 
     for (;;) {
         extension_enabled_option = GetConfigOptionByName("gp_relsizes_stats.enabled", NULL);
+
         /* check if plugin created and extension enabled => start working
          * else napping until it will be started
          */
@@ -484,6 +536,10 @@ void collect_stats(Datum main_arg) {
         /* free databases_oids array */
         pfree(databases_oids);
 
+        /* put all actual data into _history table with timestamps
+         * clear actual table after all
+         */
+        put_collected_data_into_history();
     naptime:
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
                             worker_restart_naptime * 1000L);
@@ -493,10 +549,6 @@ void collect_stats(Datum main_arg) {
         if (retcode & WL_POSTMASTER_DEATH) {
             proc_exit(1);
         }
-
-        // TODO truncate or rework idea of extension
-        // need rework, it's bad idea to truncate tables (lost data)
-        // maybe put data in backup tables and after truncate current tables
     }
 }
 
@@ -514,8 +566,7 @@ void _PG_init(void) {
                             HOUR_TIME, /* set naptime between collecting stats of databases (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
     DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in sec).",
-                            NULL, &worker_file_naptime,
-                            2 * MINUTE_TIME, /* set naptime between check-phase (in seconds) */
+                            NULL, &worker_file_naptime, MINUTE_TIME, /* set naptime between check-phase (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress) {
