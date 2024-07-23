@@ -31,9 +31,9 @@
 #include <sys/stat.h>
 
 #define FILEINFO_ARGS_CNT 5
-#define HOUR_TIME 3600
-#define MINUTE_TIME 60
-#define FILE_NAPTIME 10000000 // 10 seconds
+#define HOUR_TIME 3600000 // milliseconds
+#define MINUTE_TIME 60000 // milliseconds
+#define FILE_NAPTIME 1    //  milliseconds
 
 PG_MODULE_MAGIC;
 
@@ -312,8 +312,8 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS) {
             tuplestore_putvalues(tupstore, tupdesc, outputValues, outputNulls);
 
             /* sleep between file proccessing */
-            retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-                                worker_file_naptime * 1000L);
+            retcode =
+                WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_file_naptime);
             ResetLatch(&MyProc->procLatch);
 
             /* emergency bailout if postmaster has died */
@@ -385,7 +385,7 @@ static void get_stats_for_databases(Datum *databases_oids, int databases_cnt) {
         pgstat_report_activity(STATE_IDLE, NULL);
 
         retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-                            (worker_database_naptime / databases_cnt) * 1000L);
+                            (worker_database_naptime / databases_cnt));
         ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
@@ -541,8 +541,8 @@ void collect_stats(Datum main_arg) {
          */
         put_collected_data_into_history();
     naptime:
-        retcode = WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-                            worker_restart_naptime * 1000L);
+        retcode =
+            WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_restart_naptime);
         ResetLatch(&MyProc->procLatch);
 
         /* emergency bailout if postmaster has died */
@@ -563,10 +563,10 @@ void _PG_init(void) {
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
     DefineCustomIntVariable("gp_relsizes_stats.database_naptime", "Duration between collect-phase for db (in sec).",
                             NULL, &worker_database_naptime,
-                            HOUR_TIME, /* set naptime between collecting stats of databases (in seconds) */
+                            30 * MINUTE_TIME, /* set naptime between collecting stats of databases (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
     DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in sec).",
-                            NULL, &worker_file_naptime, MINUTE_TIME, /* set naptime between check-phase (in seconds) */
+                            NULL, &worker_file_naptime, FILE_NAPTIME, /* set naptime between check-phase (in seconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress) {
