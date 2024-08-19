@@ -587,16 +587,17 @@ void _PG_init(void) {
     DefineCustomBoolVariable("gp_relsizes_stats.enabled", "Enable extension flag", NULL, &extension_enabled, false,
                              PGC_SIGHUP, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
     /* define GUC naptime variables */
-    DefineCustomIntVariable("gp_relsizes_stats.restart_naptime", "Duration between every collect-phases (in sec).",
-                            NULL, &worker_restart_naptime,
-                            6 * HOUR_TIME, /* set naptime between check-phase (in seconds) */
+    DefineCustomIntVariable("gp_relsizes_stats.restart_naptime", "Duration between every collect-phases (in ms).", NULL,
+                            &worker_restart_naptime,
+                            6 * HOUR_TIME, /* set naptime between check-phase (in milliseconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
-    DefineCustomIntVariable("gp_relsizes_stats.database_naptime", "Duration between collect-phase for db (in sec).",
+    DefineCustomIntVariable("gp_relsizes_stats.database_naptime", "Duration between collect-phase for db (in ms).",
                             NULL, &worker_database_naptime,
-                            30 * MINUTE_TIME, /* set naptime between collecting stats of databases (in seconds) */
+                            1, /* set naptime between collecting stats of databases (in milliseconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
-    DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in sec).",
-                            NULL, &worker_file_naptime, FILE_NAPTIME, /* set naptime between check-phase (in seconds) */
+    DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in ms).",
+                            NULL, &worker_file_naptime,
+                            FILE_NAPTIME, /* set naptime between check-phase (in milliseconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress) {
