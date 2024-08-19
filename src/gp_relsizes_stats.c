@@ -360,7 +360,7 @@ static void run_database_stats_worker() {
     database_worker.bgw_main_arg = (Datum)0;
     database_worker.bgw_start_rule = NULL;
     /* Fill in worker-specific data, and do the actual registrations. */
-    snprintf(database_worker.bgw_name, BGW_MAXLEN, "stats_collector_worker for %s", shared_data->dbname);
+    snprintf(database_worker.bgw_name, BGW_MAXLEN, "database_relsizes_collector_worker for %s", shared_data->dbname);
     old_ctx = MemoryContextSwitchTo(TopMemoryContext);
     ret = RegisterDynamicBackgroundWorker(&database_worker, &handle);
     MemoryContextSwitchTo(old_ctx);
