@@ -2,4 +2,3 @@
 comment = 'gp_relsizes_stats - an extension to track table on-disc sizes in greenplum'
 default_version = '1.0'
 module_pathname = '$libdir/gp_relsizes_stats'
-superuser = true
