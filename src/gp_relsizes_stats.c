@@ -213,8 +213,8 @@ finish_transaction:
 
 static int update_segment_file_map_table() {
     int retcode = 0;
-    char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_map";
-    char *sql_insert = "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM "
+    char *sql_truncate = "TRUNCATE TABLE relsizes_stats_schema.segment_file_map";
+    char *sql_insert = "INSERT INTO relsizes_stats_schema.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM "
                        "gp_dist_random('pg_class')";
     char *error = NULL;
     /* update report activity */
@@ -303,7 +303,7 @@ void relsizes_database_stats_job(Datum args) {
     }
 
     /* update report activity */
-    char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_sizes";
+    char *sql_truncate = "TRUNCATE TABLE relsizes_stats_schema.segment_file_sizes";
     pgstat_report_activity(STATE_RUNNING, sql_truncate);
     retcode = SPI_execute(sql_truncate, false, 0);
     if (retcode != SPI_OK_UTILITY || SPI_processed < 0) { /* error */
@@ -311,7 +311,7 @@ void relsizes_database_stats_job(Datum args) {
         goto finish_spi;
     }
 
-    sql = psprintf("INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
+    sql = psprintf("INSERT INTO relsizes_stats_schema.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
                    "SELECT * FROM get_stats_for_database(%d)",
                    MyDatabaseId);
     pgstat_report_activity(STATE_RUNNING, sql);
@@ -526,7 +526,7 @@ static int plugin_created() {
 static int put_collected_data_into_history() {
     int retcode = 0;
     char *sql_insert =
-        "INSERT INTO mdb_toolkit.segment_file_sizes_history SELECT now(), * FROM mdb_toolkit.segment_file_sizes";
+        "INSERT INTO relsizes_stats_schema.segment_file_sizes_history SELECT now(), * FROM relsizes_stats_schema.segment_file_sizes";
     char *error = NULL;
 
     pgstat_report_activity(STATE_RUNNING, sql_insert);
