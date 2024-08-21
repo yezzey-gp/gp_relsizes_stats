@@ -52,9 +52,8 @@ static void run_database_stats_worker(void);
 static int plugin_created(void);
 static BgwHandleStatus WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle);
 static void relsizes_shmem_startup(void);
-static int create_actual_partition(void);
-static int delete_outdated_partitions(void);
-static int put_data_into_partition(void);
+static int truncate_data_in_history(void);
+static int put_data_into_history(void);
 void _PG_init(void);
 void _PG_fini(void);
 
