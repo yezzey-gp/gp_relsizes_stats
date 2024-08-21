@@ -46,7 +46,7 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS);
 static void worker_sigterm(SIGNAL_ARGS);
 static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx);
 static int update_segment_file_map_table(void);
-static int put_collected_data_into_history(void);
+static int update_table_sizes_history(void);
 static void get_stats_for_databases(Datum *databases_oids, int databases_cnt);
 static void run_database_stats_worker(void);
 static int plugin_created(void);
@@ -327,7 +327,7 @@ void relsizes_database_stats_job(Datum args) {
         goto finish_spi;
     }
 
-    retcode = put_collected_data_into_history();
+    retcode = update_table_sizes_history();
     if (retcode < 0) {
         error = "relsizes_database_stats_job: updating tables sizes history table failed";
         goto finish_spi;
@@ -529,15 +529,15 @@ static int plugin_created() {
     return (retcode == SPI_OK_SELECT ? SPI_processed : -1);
 }
 
-static int create_actual_partition() {
-    char *sql = "select create_actual_partition()";
+static int truncate_data_in_history() {
+    char *sql = "TRUNCATE TABLE relsizes_stats_schema.table_sizes_history";
 
     /* report to pg_stat_activity about query */
     pgstat_report_activity(STATE_RUNNING, sql);
-    return (SPI_execute(sql, false, 0) == SPI_OK_SELECT ? SPI_processed : -1);
+    return (SPI_execute(sql, false, 0) == SPI_OK_UTILITY ? 0 : -1);
 }
 
-static int put_data_into_partition() {
+static int put_data_into_history() {
     char *sql = "INSERT INTO relsizes_stats_schema.table_sizes_history SELECT CURRENT_DATE, * FROM "
                 "relsizes_stats_schema.table_sizes";
 
@@ -546,77 +546,21 @@ static int put_data_into_partition() {
     return (SPI_execute(sql, false, 0) == SPI_OK_INSERT && SPI_processed >= 0 ? 0 : -1);
 }
 
-static int delete_outdated_partitions() {
-    int ret;
-    SPITupleTable *tuptable;
-    char cutoff_date_str[11];
-
-    time_t t = time(NULL);
-    struct tm *current_time = localtime(&t);
-
-    /* subtract 10 days for example */
-    current_time->tm_mday -= 10;
-    mktime(current_time);
-
-    /* format the cutoff date into a string "YYYY-MM-DD" */
-    strftime(cutoff_date_str, sizeof(cutoff_date_str), "%Y_%m_%d", current_time);
-
-    char *inner_query = psprintf("SELECT partitionname"
-                                 " FROM pg_partitions"
-                                 " WHERE tablename = 'table_sizes_history'"
-                                 " AND partitionname ~ '^p[0-9]{4}_[0-9]{2}_[0-9]{2}$'"
-                                 " AND to_date(substring(partitionname from 2 for 11), 'YYYY_MM_DD') < '%s'",
-                                 cutoff_date_str);
-
-    /* execute the query to find old partitions */
-    ret = SPI_execute(inner_query, true, 0);
-    if (ret != SPI_OK_SELECT) {
-        ereport(ERROR, (errmsg("SPI_execute failed with error code %d", ret)));
-    }
-
-    tuptable = SPI_tuptable;
-
-    /* loop through the results */
-    for (int i = 0; i < SPI_processed; i++) {
-        HeapTuple tuple = tuptable->vals[i];
-        char *partition_name = SPI_getvalue(tuple, tuptable->tupdesc, 1);
-
-        if (partition_name != NULL) {
-            char *drop_query = psprintf("ALTER TABLE relsizes_stats_schema.table_sizes_history DROP PARTITION %s",
-                                        quote_identifier(partition_name));
-
-            ret = SPI_execute(drop_query, false, 0);
-            if (ret != SPI_OK_UTILITY) {
-                ereport(ERROR, (errmsg("Failed to drop partition: %s", partition_name)));
-            }
-        }
-    }
-    return 0;
-}
-
-static int put_collected_data_into_history() {
+static int update_table_sizes_history() {
     int retcode = 0;
     char *error = NULL;
 
-    /* add new partition for current day if it does not exist */
-    retcode = create_actual_partition();
+    /* truncate old data in history table */
+    retcode = truncate_data_in_history();
     if (retcode < 0) {
-        error = "put_collected_data_into_history: creating actual partition failed";
+        error = "update_table_sizes_history: trucate old data failed";
         goto cleanup;
     }
 
     /* put collected data into history table */
-    retcode = put_data_into_partition();
+    retcode = put_data_into_history();
     if (retcode < 0) {
-        error = "put_collected_data_into_history: put actual data into history failed";
-        goto cleanup;
-    }
-
-    /* delete outdated partitions from history table */
-    // retcode = delete_outdated_partitions(); // TODO fix that function (can not delete old partitions)
-    if (retcode < 0) {
-        error = "put_collected_data_into_history: deleting outdated partitions failed";
-        goto cleanup;
+        error = "update_table_sizes_history: put actual data into history failed";
     }
 
 cleanup:
