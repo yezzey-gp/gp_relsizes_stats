@@ -17,6 +17,7 @@
 #include "pgstat.h"
 #include "tcop/utility.h"
 
+#include "catalog/namespace.h"
 #include "cdb/cdbvars.h"
 #include "commands/defrem.h"
 #include "executor/spi.h"
@@ -26,9 +27,11 @@
 #include "utils/datum.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 
 #include <sys/stat.h>
+#include <time.h>
 
 #define FILEINFO_ARGS_CNT 5
 #define HOUR_TIME 3600000 // milliseconds
@@ -49,6 +52,9 @@ static void run_database_stats_worker(void);
 static int plugin_created(void);
 static BgwHandleStatus WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle);
 static void relsizes_shmem_startup(void);
+static int create_actual_partition(void);
+static int delete_outdated_partitions(void);
+static int put_data_into_partition(void);
 void _PG_init(void);
 void _PG_fini(void);
 
@@ -282,7 +288,7 @@ void relsizes_database_stats_job(Datum args) {
     }
     PushActiveSnapshot(GetTransactionSnapshot());
 
-    // check if plugin created and extension enabled
+    /* check if plugin created and extension enabled */
     extension_enabled_option = GetConfigOptionByName("gp_relsizes_stats.enabled", NULL);
     if (strcmp(extension_enabled_option, "on") == 0) {
         int created = plugin_created();
@@ -323,7 +329,7 @@ void relsizes_database_stats_job(Datum args) {
 
     retcode = put_collected_data_into_history();
     if (retcode < 0) {
-        error = "relsizes_database_stats_job: SPI_execute failed (updating segment_file_sizes_history)";
+        error = "relsizes_database_stats_job: updating tables sizes history table failed";
         goto finish_spi;
     }
 
@@ -523,20 +529,98 @@ static int plugin_created() {
     return (retcode == SPI_OK_SELECT ? SPI_processed : -1);
 }
 
-static int put_collected_data_into_history() {
-    int retcode = 0;
-    char *sql_insert =
-        "INSERT INTO relsizes_stats_schema.segment_file_sizes_history SELECT now(), * FROM relsizes_stats_schema.segment_file_sizes";
-    char *error = NULL;
+static int create_actual_partition() {
+    char *sql = "select create_actual_partition()";
 
-    pgstat_report_activity(STATE_RUNNING, sql_insert);
-    retcode = SPI_execute(sql_insert, false, 0);
-    if (retcode != SPI_OK_INSERT || SPI_processed < 0) { /* error */
-        error = "put_collected_data_into_history: SPI_execute failed (failed to insert data into history table)";
+    /* report to pg_stat_activity about query */
+    pgstat_report_activity(STATE_RUNNING, sql);
+    return (SPI_execute(sql, false, 0) == SPI_OK_SELECT ? SPI_processed : -1);
+}
+
+static int put_data_into_partition() {
+    char *sql = "INSERT INTO relsizes_stats_schema.table_sizes_history SELECT CURRENT_DATE, * FROM "
+                "relsizes_stats_schema.table_sizes";
+
+    /* report to pg_stat_activity about query */
+    pgstat_report_activity(STATE_RUNNING, sql);
+    return (SPI_execute(sql, false, 0) == SPI_OK_INSERT && SPI_processed >= 0 ? 0 : -1);
+}
+
+static int delete_outdated_partitions() {
+    int ret;
+    SPITupleTable *tuptable;
+    char cutoff_date_str[11];
+
+    time_t t = time(NULL);
+    struct tm *current_time = localtime(&t);
+
+    /* subtract 10 days for example */
+    current_time->tm_mday -= 10;
+    mktime(current_time);
+
+    /* format the cutoff date into a string "YYYY-MM-DD" */
+    strftime(cutoff_date_str, sizeof(cutoff_date_str), "%Y_%m_%d", current_time);
+
+    char *inner_query = psprintf("SELECT partitionname"
+                                 " FROM pg_partitions"
+                                 " WHERE tablename = 'table_sizes_history'"
+                                 " AND partitionname ~ '^p[0-9]{4}_[0-9]{2}_[0-9]{2}$'"
+                                 " AND to_date(substring(partitionname from 2 for 11), 'YYYY_MM_DD') < '%s'",
+                                 cutoff_date_str);
+
+    /* execute the query to find old partitions */
+    ret = SPI_execute(inner_query, true, 0);
+    if (ret != SPI_OK_SELECT) {
+        ereport(ERROR, (errmsg("SPI_execute failed with error code %d", ret)));
     }
 
-    pgstat_report_activity(STATE_IDLE, NULL);
+    tuptable = SPI_tuptable;
 
+    /* loop through the results */
+    for (int i = 0; i < SPI_processed; i++) {
+        HeapTuple tuple = tuptable->vals[i];
+        char *partition_name = SPI_getvalue(tuple, tuptable->tupdesc, 1);
+
+        if (partition_name != NULL) {
+            char *drop_query = psprintf("ALTER TABLE relsizes_stats_schema.table_sizes_history DROP PARTITION %s",
+                                        quote_identifier(partition_name));
+
+            ret = SPI_execute(drop_query, false, 0);
+            if (ret != SPI_OK_UTILITY) {
+                ereport(ERROR, (errmsg("Failed to drop partition: %s", partition_name)));
+            }
+        }
+    }
+    return 0;
+}
+
+static int put_collected_data_into_history() {
+    int retcode = 0;
+    char *error = NULL;
+
+    /* add new partition for current day if it does not exist */
+    retcode = create_actual_partition();
+    if (retcode < 0) {
+        error = "put_collected_data_into_history: creating actual partition failed";
+        goto cleanup;
+    }
+
+    /* put collected data into history table */
+    retcode = put_data_into_partition();
+    if (retcode < 0) {
+        error = "put_collected_data_into_history: put actual data into history failed";
+        goto cleanup;
+    }
+
+    /* delete outdated partitions from history table */
+    // retcode = delete_outdated_partitions(); // TODO fix that function (can not delete old partitions)
+    if (retcode < 0) {
+        error = "put_collected_data_into_history: deleting outdated partitions failed";
+        goto cleanup;
+    }
+
+cleanup:
+    pgstat_report_activity(STATE_IDLE, NULL);
     if (error != NULL) {
         ereport(WARNING, (errmsg("%s: %m", error)));
     }
@@ -553,9 +637,13 @@ void relsizes_collect_stats(Datum main_arg) {
     BackgroundWorkerInitializeConnection("postgres", NULL);
 
     while (!got_sigterm) {
+        /* get databases oids with database's names */
         databases_oids = get_databases_oids(&databases_cnt, CurrentMemoryContext);
+        /* start collecting stats for databases */
         get_stats_for_databases(databases_oids, databases_cnt);
+        /* free allocated memory for data about databases */
         pfree(databases_oids);
+        /* sleep for restart_naptime time */
         retcode =
             WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_restart_naptime);
         ResetLatch(&MyProc->procLatch);
