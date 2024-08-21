@@ -5,25 +5,25 @@
 
 
 -- CREATE TABLE IF NOT EXISTS ... (....) DISTRIBUTED BY ...
-CREATE SCHEMA IF NOT EXISTS mdb_toolkit;
+CREATE SCHEMA IF NOT EXISTS relsizes_stats_schema;
 
 -- create table
-CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_map
+CREATE TABLE IF NOT EXISTS relsizes_stats_schema.segment_file_map
     (segment INTEGER, reloid OID, relfilenode OID)
     WITH (appendonly=true) DISTRIBUTED RANDOMLY;
 -- create table
-CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes
+CREATE TABLE IF NOT EXISTS relsizes_stats_schema.segment_file_sizes
     (segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
     WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;
-TRUNCATE TABLE mdb_toolkit.segment_file_sizes;
--- create table
-CREATE TABLE IF NOT EXISTS mdb_toolkit.segment_file_sizes_history
-    (ts TIMESTAMPTZ, segment INTEGER, relfilenode OID, filepath TEXT, size BIGINT, mtime BIGINT)
-    WITH (appendonly=true, OIDS=FALSE) DISTRIBUTED RANDOMLY;
-TRUNCATE TABLE mdb_toolkit.segment_file_sizes_history;
+TRUNCATE TABLE relsizes_stats_schema.segment_file_sizes;
+-- create table for backup info
+CREATE TABLE IF NOT EXISTS relsizes_stats_schema.table_sizes_history
+    (insert_date date NOT NULL, nspname text NOT NULL, relname text NOT NULL, size bigint NOT NULL, mtime timestamp NOT NULL)
+    DISTRIBUTED RANDOMLY;
+TRUNCATE TABLE relsizes_stats_schema.table_sizes_history;
 
 
-CREATE OR REPLACE VIEW mdb_toolkit.table_files AS
+CREATE OR REPLACE VIEW relsizes_stats_schema.table_files AS
     WITH part_oids AS (
         SELECT n.nspname, c1.relname, c1.oid
         FROM pg_class c1
@@ -67,13 +67,13 @@ CREATE OR REPLACE VIEW mdb_toolkit.table_files AS
     )
     SELECT table_oids.nspname, table_oids.relname, m.segment, m.relfilenode, fs.filepath, kind, size, mtime
     FROM table_oids
-    JOIN mdb_toolkit.segment_file_map m ON table_oids.oid = m.reloid
-    JOIN mdb_toolkit.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode;
-CREATE OR REPLACE VIEW mdb_toolkit.table_sizes AS
-    SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM mdb_toolkit.table_files
+    JOIN relsizes_stats_schema.segment_file_map m ON table_oids.oid = m.reloid
+    JOIN relsizes_stats_schema.segment_file_sizes fs ON m.segment = fs.segment AND m.relfilenode = fs.relfilenode;
+CREATE OR REPLACE VIEW relsizes_stats_schema.table_sizes AS
+    SELECT nspname, relname, sum(size) AS size, to_timestamp(MAX(mtime)) AS mtime FROM relsizes_stats_schema.table_files
     GROUP BY nspname, relname;
-CREATE OR REPLACE VIEW mdb_toolkit.namespace_sizes AS
-    SELECT nspname, sum(size) AS size FROM mdb_toolkit.table_files
+CREATE OR REPLACE VIEW relsizes_stats_schema.namespace_sizes AS
+    SELECT nspname, sum(size) AS size FROM relsizes_stats_schema.table_files
     GROUP BY nspname;
 -- Here go any C or PL/SQL functions, table or view definitions etc
 -- for example:

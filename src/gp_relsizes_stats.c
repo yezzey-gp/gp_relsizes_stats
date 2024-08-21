@@ -17,6 +17,7 @@
 #include "pgstat.h"
 #include "tcop/utility.h"
 
+#include "catalog/namespace.h"
 #include "cdb/cdbvars.h"
 #include "commands/defrem.h"
 #include "executor/spi.h"
@@ -26,9 +27,11 @@
 #include "utils/datum.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 
 #include <sys/stat.h>
+#include <time.h>
 
 #define FILEINFO_ARGS_CNT 5
 #define HOUR_TIME 3600000 // milliseconds
@@ -43,12 +46,14 @@ Datum get_stats_for_database(PG_FUNCTION_ARGS);
 static void worker_sigterm(SIGNAL_ARGS);
 static Datum *get_databases_oids(int *databases_cnt, MemoryContext ctx);
 static int update_segment_file_map_table(void);
-static int put_collected_data_into_history(void);
+static int update_table_sizes_history(void);
 static void get_stats_for_databases(Datum *databases_oids, int databases_cnt);
 static void run_database_stats_worker(void);
 static int plugin_created(void);
 static BgwHandleStatus WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle);
 static void relsizes_shmem_startup(void);
+static int truncate_data_in_history(void);
+static int put_data_into_history(void);
 void _PG_init(void);
 void _PG_fini(void);
 
@@ -213,8 +218,8 @@ finish_transaction:
 
 static int update_segment_file_map_table() {
     int retcode = 0;
-    char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_map";
-    char *sql_insert = "INSERT INTO mdb_toolkit.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM "
+    char *sql_truncate = "TRUNCATE TABLE relsizes_stats_schema.segment_file_map";
+    char *sql_insert = "INSERT INTO relsizes_stats_schema.segment_file_map SELECT gp_segment_id, oid, relfilenode FROM "
                        "gp_dist_random('pg_class')";
     char *error = NULL;
     /* update report activity */
@@ -282,7 +287,7 @@ void relsizes_database_stats_job(Datum args) {
     }
     PushActiveSnapshot(GetTransactionSnapshot());
 
-    // check if plugin created and extension enabled
+    /* check if plugin created and extension enabled */
     extension_enabled_option = GetConfigOptionByName("gp_relsizes_stats.enabled", NULL);
     if (strcmp(extension_enabled_option, "on") == 0) {
         int created = plugin_created();
@@ -303,7 +308,7 @@ void relsizes_database_stats_job(Datum args) {
     }
 
     /* update report activity */
-    char *sql_truncate = "TRUNCATE TABLE mdb_toolkit.segment_file_sizes";
+    char *sql_truncate = "TRUNCATE TABLE relsizes_stats_schema.segment_file_sizes";
     pgstat_report_activity(STATE_RUNNING, sql_truncate);
     retcode = SPI_execute(sql_truncate, false, 0);
     if (retcode != SPI_OK_UTILITY || SPI_processed < 0) { /* error */
@@ -311,7 +316,7 @@ void relsizes_database_stats_job(Datum args) {
         goto finish_spi;
     }
 
-    sql = psprintf("INSERT INTO mdb_toolkit.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
+    sql = psprintf("INSERT INTO relsizes_stats_schema.segment_file_sizes (segment, relfilenode, filepath, size, mtime) "
                    "SELECT * FROM get_stats_for_database(%d)",
                    MyDatabaseId);
     pgstat_report_activity(STATE_RUNNING, sql);
@@ -321,9 +326,9 @@ void relsizes_database_stats_job(Datum args) {
         goto finish_spi;
     }
 
-    retcode = put_collected_data_into_history();
+    retcode = update_table_sizes_history();
     if (retcode < 0) {
-        error = "relsizes_database_stats_job: SPI_execute failed (updating segment_file_sizes_history)";
+        error = "relsizes_database_stats_job: updating tables sizes history table failed";
         goto finish_spi;
     }
 
@@ -523,20 +528,42 @@ static int plugin_created() {
     return (retcode == SPI_OK_SELECT ? SPI_processed : -1);
 }
 
-static int put_collected_data_into_history() {
+static int truncate_data_in_history() {
+    char *sql = "TRUNCATE TABLE relsizes_stats_schema.table_sizes_history";
+
+    /* report to pg_stat_activity about query */
+    pgstat_report_activity(STATE_RUNNING, sql);
+    return (SPI_execute(sql, false, 0) == SPI_OK_UTILITY ? 0 : -1);
+}
+
+static int put_data_into_history() {
+    char *sql = "INSERT INTO relsizes_stats_schema.table_sizes_history SELECT CURRENT_DATE, * FROM "
+                "relsizes_stats_schema.table_sizes";
+
+    /* report to pg_stat_activity about query */
+    pgstat_report_activity(STATE_RUNNING, sql);
+    return (SPI_execute(sql, false, 0) == SPI_OK_INSERT && SPI_processed >= 0 ? 0 : -1);
+}
+
+static int update_table_sizes_history() {
     int retcode = 0;
-    char *sql_insert =
-        "INSERT INTO mdb_toolkit.segment_file_sizes_history SELECT now(), * FROM mdb_toolkit.segment_file_sizes";
     char *error = NULL;
 
-    pgstat_report_activity(STATE_RUNNING, sql_insert);
-    retcode = SPI_execute(sql_insert, false, 0);
-    if (retcode != SPI_OK_INSERT || SPI_processed < 0) { /* error */
-        error = "put_collected_data_into_history: SPI_execute failed (failed to insert data into history table)";
+    /* truncate old data in history table */
+    retcode = truncate_data_in_history();
+    if (retcode < 0) {
+        error = "update_table_sizes_history: trucate old data failed";
+        goto cleanup;
     }
 
-    pgstat_report_activity(STATE_IDLE, NULL);
+    /* put collected data into history table */
+    retcode = put_data_into_history();
+    if (retcode < 0) {
+        error = "update_table_sizes_history: put actual data into history failed";
+    }
 
+cleanup:
+    pgstat_report_activity(STATE_IDLE, NULL);
     if (error != NULL) {
         ereport(WARNING, (errmsg("%s: %m", error)));
     }
@@ -553,9 +580,13 @@ void relsizes_collect_stats(Datum main_arg) {
     BackgroundWorkerInitializeConnection("postgres", NULL);
 
     while (!got_sigterm) {
+        /* get databases oids with database's names */
         databases_oids = get_databases_oids(&databases_cnt, CurrentMemoryContext);
+        /* start collecting stats for databases */
         get_stats_for_databases(databases_oids, databases_cnt);
+        /* free allocated memory for data about databases */
         pfree(databases_oids);
+        /* sleep for restart_naptime time */
         retcode =
             WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, worker_restart_naptime);
         ResetLatch(&MyProc->procLatch);
