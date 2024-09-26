@@ -32,6 +32,7 @@
 
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #define FILEINFO_ARGS_CNT 5
 #define HOUR_TIME 3600000 // milliseconds
