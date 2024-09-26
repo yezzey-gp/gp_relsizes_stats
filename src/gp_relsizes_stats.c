@@ -617,7 +617,7 @@ static void relsizes_shmem_startup() {
 void _PG_init(void) {
     /* define GUC extension enable flag */
     DefineCustomBoolVariable("gp_relsizes_stats.enabled", "Enable extension flag", NULL, &extension_enabled, false,
-                             PGC_SIGHUP, 0, NULL, NULL, NULL);
+                             PGC_SIGHUP, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
     /* define GUC naptime variables */
     DefineCustomIntVariable("gp_relsizes_stats.restart_naptime", "Duration between every collect-phases (in ms).", NULL,
                             &worker_restart_naptime,
