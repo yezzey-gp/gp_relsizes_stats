@@ -1,4 +1,4 @@
-#gp_relsizes_stats: Table sizes monitoring tool for Greenplum
+# gp_relsizes_stats: Table sizes monitoring tool for Greenplum
 
 ### Features
 gp_relsizes_stats is an extension for the Greenplum database that calculates and stores statistics on the size of files and tables, occupied space on the disks of the master and segment hosts.
