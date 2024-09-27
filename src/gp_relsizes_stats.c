@@ -625,7 +625,7 @@ void _PG_init(void) {
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
     DefineCustomIntVariable("gp_relsizes_stats.database_naptime", "Duration between collect-phase for db (in ms).",
                             NULL, &worker_database_naptime,
-                            1, /* set naptime between collecting stats of databases (in milliseconds) */
+                            0, /* set naptime between collecting stats of databases (in milliseconds) */
                             1, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
     DefineCustomIntVariable("gp_relsizes_stats.file_naptime", "Duration between each collect-phase for files (in ms).",
                             NULL, &worker_file_naptime,
